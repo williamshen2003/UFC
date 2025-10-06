@@ -31,7 +31,7 @@ class Config:
 
     # Calibration settings
     use_calibration: bool = True
-    calibration_type: str = 'isotonic'  # Options: 'range_based', 'isotonic', False
+    calibration_type: str = 'isotonic'
     range_calibration_ranges: List[float] = field(default_factory=lambda: [0.25, 0.45, 0.65, 0.85])
 
     # Betting strategy parameters
@@ -46,13 +46,13 @@ class Config:
     odds_type: str = 'close'  # Options: 'open', 'close', 'average'
 
     # Model settings
-    use_ensemble: bool = True  # Whether to use ensemble of models
+    use_ensemble: bool = False  # Whether to use ensemble of models
     model_files: List[str] = field(default_factory=lambda: [
-        'run1_final_model_20251002_170207.json',
-        'run2_final_model_20251002_170851.json',
-        'run3_final_model_20251002_171555.json',
-        'run4_final_model_20251002_172253.json',
-        'run5_final_model_20251002_172930.json'
+        'run1_final_model_20251006_111854.json',
+        'run2_final_model_20251005_125918.json',
+        'run3_final_model_20251005_130755.json',
+        'run4_final_model_20251005_131727.json',
+        'run5_final_model_20251005_132639.json'
     ])
 
     # Data paths
@@ -60,7 +60,7 @@ class Config:
     test_data_path: str = '../../../data/train_test/test_data.csv'
     # test_data_path: str = '../../../data/matchup data/all_matchups.csv'
     encoder_path: str = '../../../saved_models/encoders/category_encoder.pkl'
-    model_base_path: str = '../../../saved_models/xgboost/nested_val/'
+    model_base_path: str = '../../../saved_models/xgboost/no_women/'
 
     # Display settings
     display_columns: List[str] = field(default_factory=lambda: ['current_fight_date', 'fighter_a', 'fighter_b'])

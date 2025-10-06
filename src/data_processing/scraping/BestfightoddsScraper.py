@@ -19,7 +19,7 @@ import queue
 
 
 class BestFightOddsScraperSelenium:
-    def __init__(self, num_workers=48):
+    def __init__(self, num_workers=3):
         self.num_workers = num_workers
         self.unprocessed_fighters = []
         self.progress_queue = queue.Queue()
@@ -345,7 +345,7 @@ if __name__ == "__main__":
             print(f"Preparing to scrape {len(fighters)} fighters from {master_fighter_list_file}")
 
             # Initialize scraper
-            scraper = BestFightOddsScraperSelenium(num_workers=48) # Adjust workers if needed
+            scraper = BestFightOddsScraperSelenium(num_workers=3) # Adjust workers if needed
 
             # Scrape data
             new_odds_df_raw = scraper.scrape_all(fighters)

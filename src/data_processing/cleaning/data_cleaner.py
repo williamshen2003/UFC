@@ -894,7 +894,10 @@ class MatchupProcessor:
         df = df.copy()
 
         # Create a temporary fight_pair column based on sorted fighter names
-        df['fight_pair'] = df.apply(lambda row: tuple(sorted([row['fighter_a'], row['fighter_b']])), axis=1)
+        df['fight_pair'] = df.apply(
+            lambda row: tuple(sorted([row['fighter_a'], row['fighter_b']])) + (row['current_fight_date'],),
+            axis=1
+        )
 
         if random:
             # Shuffle the data to randomize which duplicate is kept
@@ -1070,7 +1073,7 @@ def main():
     # Split into train/val/test
     matchup_processor.split_train_val_test(
         'matchup data/matchup_data_3_avg_name.csv',
-        '2024-01-01',
+        '2025-01-01',
         '2025-12-31',
         20
     )

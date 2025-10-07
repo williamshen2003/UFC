@@ -209,18 +209,14 @@ class ModelManager:
         return self._apply_standard_calibration(X_val, y_val, X_test)
 
     def _get_uncalibrated_predictions(self, X_test: pd.DataFrame) -> List[np.ndarray]:
-        """Get uncalibrated predictions from models"""
         y_pred_proba_list = []
         for model in self.models:
-            predictions = []
-            for i in range(len(X_test)):
-                pred = model.predict_proba(X_test.iloc[[i]])
-                predictions.append(pred[0])
-            y_pred_proba_list.append(np.array(predictions))
+            # single vectorized call per model
+            y_pred_proba_list.append(model.predict_proba(X_test))
         return y_pred_proba_list
 
-    def _apply_standard_calibration(self, X_val: pd.DataFrame, y_val: pd.Series, X_test: pd.DataFrame) -> List[np.ndarray]:
-        """Apply standard isotonic or sigmoid calibration"""
+    def _apply_standard_calibration(self, X_val: pd.DataFrame, y_val: pd.Series, X_test: pd.DataFrame) -> List[
+        np.ndarray]:
         calibrated_models = []
         for model in self.models:
             calibrated_model = CalibratedClassifierCV(model, cv='prefit', method=self.config.calibration_type)
@@ -229,12 +225,8 @@ class ModelManager:
 
         y_pred_proba_list = []
         for model in calibrated_models:
-            predictions = []
-            for i in range(len(X_test)):
-                pred = model.predict_proba(X_test.iloc[[i]])
-                predictions.append(pred[0])
-            y_pred_proba_list.append(np.array(predictions))
-
+            # single vectorized call per model
+            y_pred_proba_list.append(model.predict_proba(X_test))
         return y_pred_proba_list
 
 
@@ -265,6 +257,10 @@ def main(config: Optional[Config] = None):
         expected_features = model_manager.models[0].get_booster().feature_names
         X_val = X_val.reindex(columns=expected_features)
         X_test = X_test.reindex(columns=expected_features)
+
+        # CAST to float32 for faster predict (keeps structure unchanged)
+        X_val = _safe_downcast_float32(X_val)
+        X_test = _safe_downcast_float32(X_test)
 
         # Apply calibration and get predictions
         print(
@@ -347,6 +343,19 @@ def print_overall_metrics(y_test: pd.Series, y_pred: np.ndarray, y_pred_proba: n
             print(f"Warning: Could not calculate {metric_name} - {str(e)}")
 
     console.print(table)
+
+
+def _safe_downcast_float32(df: pd.DataFrame) -> pd.DataFrame:
+    """Downcast ONLY float columns to float32 when safe (avoids overflow warnings)."""
+    max32 = np.finfo(np.float32).max
+    float_cols = df.select_dtypes(include=[np.floating]).columns
+    for c in float_cols:
+        col = df[c]
+        with np.errstate(over="ignore", invalid="ignore"):
+            max_abs = np.nanmax(np.abs(col.to_numpy(dtype=np.float64, copy=False)))
+        if np.isfinite(max_abs) and max_abs <= max32:
+            df[c] = col.astype(np.float32, copy=False)
+    return df
 
 
 if __name__ == "__main__":

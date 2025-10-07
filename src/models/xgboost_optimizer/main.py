@@ -24,12 +24,12 @@ warnings.filterwarnings("ignore")
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DATA_DIR = PROJECT_ROOT / "data" / "train_test"
 SAVE_DIR = PROJECT_ROOT / "saved_models" / "xgboost" / "trials"
-FINAL_MODEL_DIR = PROJECT_ROOT / "saved_models" / "xgboost" / "no_women"
+FINAL_MODEL_DIR = PROJECT_ROOT / "saved_models" / "xgboost" / "new_features_15y2"
 TRIAL_PLOTS_DIR = SAVE_DIR / "trial_plots"
 
-ACC_THRESHOLD = 0.60
-VAL_ACC_SAVE_THRESHOLD = 0.60
-LOSS_GAP_THRESHOLD = 0.05
+ACC_THRESHOLD = 0.50
+VAL_ACC_SAVE_THRESHOLD = 0.50
+LOSS_GAP_THRESHOLD = 1
 
 # Configuration: Set to False to drop all columns containing "odd" in their name
 INCLUDE_ODDS_COLUMNS = False
@@ -91,7 +91,85 @@ def load_data_for_cv(train_path: str | Path | None = None,
     if obj_cols:
         print(f"Categorical cols: {obj_cols}")
 
+    # Clean data to remove inf/NaN values
+    X, y = clean_data_for_xgboost(X, y)
+
     return X, y, dates
+
+
+def clean_data_for_xgboost(X: pd.DataFrame, y: pd.Series) -> tuple[pd.DataFrame, pd.Series]:
+    """
+    Clean data to remove inf, NaN, and extremely large values that cause XGBoost errors.
+
+    Args:
+        X: Feature DataFrame
+        y: Target Series
+
+    Returns:
+        Cleaned X and y
+    """
+    print("\n" + "=" * 70)
+    print("DATA CLEANING FOR XGBOOST")
+    print("=" * 70)
+
+    initial_shape = X.shape
+
+    # 1. Check for inf values
+    inf_mask = np.isinf(X.select_dtypes(include=[np.number]).values).any(axis=1)
+    n_inf = inf_mask.sum()
+    if n_inf > 0:
+        print(f"  Found {n_inf} rows with inf values")
+        # Replace inf with NaN first
+        X = X.replace([np.inf, -np.inf], np.nan)
+
+    # 2. Check for NaN values
+    nan_counts = X.isna().sum()
+    cols_with_nan = nan_counts[nan_counts > 0]
+    if len(cols_with_nan) > 0:
+        print(f"  Found NaN values in {len(cols_with_nan)} columns")
+        print(f"  Total NaN values: {nan_counts.sum()}")
+
+        # For numeric columns, fill NaN with median
+        numeric_cols = X.select_dtypes(include=[np.number]).columns
+        for col in numeric_cols:
+            if X[col].isna().any():
+                median_val = X[col].median()
+                if pd.isna(median_val):  # If all values are NaN, use 0
+                    median_val = 0
+                X[col].fillna(median_val, inplace=True)
+
+        # For categorical columns, fill with mode or '<NA>'
+        cat_cols = X.select_dtypes(include=['category']).columns
+        for col in cat_cols:
+            if X[col].isna().any():
+                X[col].fillna('<NA>', inplace=True)
+
+    # 3. Clip extremely large values (beyond float32 range)
+    numeric_cols = X.select_dtypes(include=[np.number]).columns
+    max_val = np.finfo(np.float32).max / 10  # Use 1/10th of float32 max for safety
+    min_val = np.finfo(np.float32).min / 10
+
+    clipped_cols = []
+    for col in numeric_cols:
+        col_max = X[col].max()
+        col_min = X[col].min()
+        if col_max > max_val or col_min < min_val:
+            clipped_cols.append(col)
+            X[col] = X[col].clip(lower=min_val, upper=max_val)
+
+    if clipped_cols:
+        print(f"  Clipped {len(clipped_cols)} columns with extreme values")
+        print(f"  Clipped range: [{min_val:.2e}, {max_val:.2e}]")
+
+    # 4. Final validation
+    assert not X.isna().any().any(), "NaN values still present after cleaning"
+    assert not np.isinf(X.select_dtypes(include=[np.number]).values).any(), "Inf values still present after cleaning"
+
+    print(f"  Data shape: {initial_shape} -> {X.shape}")
+    print(f"  Data cleaned and ready for XGBoost")
+    print("=" * 70)
+
+    return X, y
 
 
 def get_walk_forward_splits(n_samples: int, n_splits: int = 5, min_train_ratio: float = 0.5):

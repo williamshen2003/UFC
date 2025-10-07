@@ -9,11 +9,10 @@ from pathlib import Path
 import random
 import threading
 import time
-
+from optuna.pruners import MedianPruner
+from optuna.integration import XGBoostPruningCallback
 import matplotlib
-
 matplotlib.use("Agg")
-
 import matplotlib.pyplot as plt
 import numpy as np
 import optuna
@@ -26,7 +25,7 @@ warnings.filterwarnings("ignore")
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DATA_DIR = PROJECT_ROOT / "data" / "train_test"
 SAVE_DIR = PROJECT_ROOT / "saved_models" / "xgboost" / "trials"
-FINAL_MODEL_DIR = PROJECT_ROOT / "saved_models" / "xgboost" / "new_features_15y_100"
+FINAL_MODEL_DIR = PROJECT_ROOT / "saved_models" / "xgboost" / "new_features_15y_50"
 TRIAL_PLOTS_DIR = SAVE_DIR / "trial_plots"
 
 ACC_THRESHOLD = 0.50
@@ -432,11 +431,16 @@ def walk_forward_nested_cv(X, y, dates, outer_cv: int = 5, inner_cv: int = 3,
                 y_in_tr, y_in_va = y_tr.iloc[in_tr_idx], y_tr.iloc[in_va_idx]
 
                 model = xgb.XGBClassifier(**params)
+
+                # prune on the validation logloss (2nd tuple in eval_set → "validation_1")
+                prune_cb = XGBoostPruningCallback(trial, "validation_1-logloss")
+
                 model.fit(
                     X_in_tr,
                     y_in_tr,
                     eval_set=[(X_in_tr, y_in_tr), (X_in_va, y_in_va)],
                     verbose=False,
+                    callbacks=[prune_cb],  # <- enables early pruning of bad trials
                 )
 
                 proba = model.predict_proba(X_in_va)[:, 1]
@@ -463,7 +467,8 @@ def walk_forward_nested_cv(X, y, dates, outer_cv: int = 5, inner_cv: int = 3,
 
         study = optuna.create_study(
             direction="maximize",
-            sampler=optuna.samplers.TPESampler(seed=random.randint(0, 100000))
+            sampler=optuna.samplers.TPESampler(seed=random.randint(0, 100000)),
+            pruner=MedianPruner(n_warmup_steps=10)  # warm up a bit before pruning
         )
         study.optimize(inner_objective, n_trials=optuna_trials)
 
@@ -480,7 +485,7 @@ def walk_forward_nested_cv(X, y, dates, outer_cv: int = 5, inner_cv: int = 3,
         final_params = {
             "objective": "binary:logistic",
             "tree_method": "hist",
-            "device": "cpu",
+            "device": "cuda",
             "enable_categorical": True,
             "eval_metric": ["logloss", "error"],
             "early_stopping_rounds": 50,
@@ -588,7 +593,8 @@ def train_final_model_on_all_data(X, y, dates, aggregated_params, median_n_estim
     final_params = {
         "objective": "binary:logistic",
         "tree_method": "hist",
-        "device": "cpu",
+        "device": "cuda",
+        "predictor": "gpu_predictor",
         "enable_categorical": True,
         "n_estimators": int(median_n_estimators),
         "eval_metric": ["logloss", "error"],

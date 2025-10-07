@@ -11,9 +11,18 @@ import threading
 import time
 from optuna.pruners import MedianPruner
 from optuna.integration import XGBoostPruningCallback
+
+# ---- Plotting / feature preview toggles ----
+SHOW_PLOTS = True            # True -> show charts via plt.show(); False -> no charts
+SHOW_TRIAL_PLOTS = False     # False -> DO NOT spam per-trial plots (keep only final fold plot)
+FEATURE_PREVIEW_N = 30       # how many of the selected features to print (preview)
+# --------------------------------------------
+
 import matplotlib
-matplotlib.use("Agg")
+if not SHOW_PLOTS:
+    matplotlib.use("Agg")  # headless only when not showing
 import matplotlib.pyplot as plt
+
 import numpy as np
 import optuna
 import pandas as pd
@@ -25,7 +34,7 @@ warnings.filterwarnings("ignore")
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DATA_DIR = PROJECT_ROOT / "data" / "train_test"
 SAVE_DIR = PROJECT_ROOT / "saved_models" / "xgboost" / "trials"
-FINAL_MODEL_DIR = PROJECT_ROOT / "saved_models" / "xgboost" / "new_features_15y_50"
+FINAL_MODEL_DIR = PROJECT_ROOT / "saved_models" / "xgboost" / "300_features_high_reg"
 TRIAL_PLOTS_DIR = SAVE_DIR / "trial_plots"
 
 ACC_THRESHOLD = 0.50
@@ -33,6 +42,9 @@ VAL_ACC_SAVE_THRESHOLD = 0.50
 LOSS_GAP_THRESHOLD = 1
 
 INCLUDE_ODDS_COLUMNS = False
+
+# Limit to top-K features to combat "many features, little data"
+TOP_K_FEATURES = 300  # <- tweak here
 
 SAVE_DIR.mkdir(parents=True, exist_ok=True)
 FINAL_MODEL_DIR.mkdir(parents=True, exist_ok=True)
@@ -139,7 +151,7 @@ class TrainingController:
 training_controller = TrainingController()
 
 
-# ==================== ORIGINAL FUNCTIONS WITH PAUSE POINTS ====================
+# ==================== DATA LOADING / CLEANING ====================
 
 def load_data_for_cv(train_path: str | Path | None = None,
                      val_path: str | Path | None = None,
@@ -249,6 +261,68 @@ def clean_data_for_xgboost(X: pd.DataFrame, y: pd.Series) -> tuple[pd.DataFrame,
     return X, y
 
 
+# ==================== FEATURE SELECTION (UPDATED) ====================
+
+def select_top_features_by_xgb(X_tr: pd.DataFrame, y_tr: pd.Series, k: int = TOP_K_FEATURES) -> tuple[list[str], list[str]]:
+    """
+    Train a quick XGBoost model on the OUTER TRAINING SPLIT ONLY and select top-k
+    features by gain importance. Returns (selected_cols, full_ranking_by_gain).
+
+    Why this avoids leakage:
+      - The selector sees only the outer-train partition and never the outer-test.
+      - So the choice of features isn't biased by the outer-test labels.
+    """
+    print(f"\n[Feature Selection] Fitting quick XGBoost on outer-train to select top {k} features...")
+    params = {
+        "objective": "binary:logistic",
+        "tree_method": "hist",
+        "device": "cuda",
+        "enable_categorical": True,
+        "n_estimators": 200,
+        "max_depth": 6,
+        "learning_rate": 0.1,
+        "subsample": 0.9,
+        "colsample_bytree": 0.9,
+        "eval_metric": "logloss",
+    }
+    fs_model = xgb.XGBClassifier(**params)
+    fs_model.fit(X_tr, y_tr, verbose=False)
+
+    booster = fs_model.get_booster()
+    score = booster.get_score(importance_type="gain")  # dict name->gain
+
+    # If feature_names were not tracked, map f{i} -> column name
+    if score and all(k.startswith("f") for k in score.keys()):
+        feat_names = booster.feature_names
+        mapped = {}
+        for key, val in score.items():
+            idx = int(key[1:])
+            if idx < len(feat_names):
+                mapped[feat_names[idx]] = val
+        score = mapped
+
+    if not score:
+        print("[Feature Selection] Warning: No importance scores found. Falling back to first K columns.")
+        full_rank = list(X_tr.columns)
+        selected_cols = full_rank[:k]
+    else:
+        # sort by gain desc and take top k, preserving original column order afterwards
+        full_rank = [name for name, _ in sorted(score.items(), key=lambda kv: kv[1], reverse=True)]
+        top_set = set(full_rank[:k])
+        selected_cols = [c for c in X_tr.columns if c in top_set]
+
+    print(f"[Feature Selection] Selected {len(selected_cols)} features.")
+    # Print a preview of the top features (by gain)
+    if FEATURE_PREVIEW_N > 0:
+        preview = full_rank[:min(FEATURE_PREVIEW_N, len(full_rank))]
+        print(f"[Feature Preview] Top {len(preview)} (by gain):")
+        print("  " + ", ".join(preview))
+
+    return selected_cols, full_rank
+
+
+# ==================== CV SPLITS & PLOTTING ====================
+
 def get_walk_forward_splits(n_samples: int, n_splits: int = 5, min_train_ratio: float = 0.5):
     """Generate walk-forward (expanding window) splits."""
     min_train_size = int(n_samples * min_train_ratio)
@@ -274,8 +348,10 @@ def get_walk_forward_splits(n_samples: int, n_splits: int = 5, min_train_ratio: 
 
 def plot_trial_metrics(train_logloss_curves, val_logloss_curves,
                        train_error_curves, val_error_curves,
-                       plot_path: Path, trial_number: int, outer_fold: int) -> None:
-    """Plot aggregated loss and accuracy curves."""
+                       trial_number: int, outer_fold: int) -> None:
+    """Plot aggregated loss and accuracy curves (optional per-trial mean curves)."""
+    if not SHOW_PLOTS or not SHOW_TRIAL_PLOTS:
+        return
     if not train_logloss_curves or not val_logloss_curves:
         return
 
@@ -300,43 +376,56 @@ def plot_trial_metrics(train_logloss_curves, val_logloss_curves,
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
     fig.suptitle(f"Optuna Trial {trial_number} - Outer Fold {outer_fold}")
 
-    for idx, curve in enumerate(train_logloss_curves):
-        rounds = np.arange(1, len(curve) + 1)
-        axes[0].plot(rounds, curve, color="tab:blue", alpha=0.3,
-                     label="Train Logloss" if idx == 0 else None)
-    for idx, curve in enumerate(val_logloss_curves):
-        rounds = np.arange(1, len(curve) + 1)
-        axes[0].plot(rounds, curve, color="tab:orange", alpha=0.5,
-                     label="Validation Logloss" if idx == 0 else None)
-    axes[0].plot(iterations, mean_train_loss, color="tab:blue", linewidth=2,
-                 label="Train Logloss (mean)")
-    axes[0].plot(iterations, mean_val_loss, color="tab:orange", linewidth=2,
-                 label="Validation Logloss (mean)")
+    axes[0].plot(iterations, mean_train_loss, linewidth=2, label="Train Logloss (mean)")
+    axes[0].plot(iterations, mean_val_loss, linewidth=2, label="Validation Logloss (mean)")
     axes[0].set_xlabel("Boosting Rounds")
     axes[0].set_ylabel("Log Loss")
     axes[0].set_title("Loss Curves")
     axes[0].legend()
 
-    for idx, curve in enumerate(train_error_curves):
-        rounds = np.arange(1, len(curve) + 1)
-        axes[1].plot(rounds, 1.0 - np.asarray(curve), color="tab:green", alpha=0.3,
-                     label="Train Accuracy" if idx == 0 else None)
-    for idx, curve in enumerate(val_error_curves):
-        rounds = np.arange(1, len(curve) + 1)
-        axes[1].plot(rounds, 1.0 - np.asarray(curve), color="tab:red", alpha=0.5,
-                     label="Validation Accuracy" if idx == 0 else None)
-    axes[1].plot(iterations, mean_train_acc, color="tab:green", linewidth=2,
-                 label="Train Accuracy (mean)")
-    axes[1].plot(iterations, mean_val_acc, color="tab:red", linewidth=2,
-                 label="Validation Accuracy (mean)")
+    axes[1].plot(iterations, mean_train_acc, linewidth=2, label="Train Accuracy (mean)")
+    axes[1].plot(iterations, mean_val_acc, linewidth=2, label="Validation Accuracy (mean)")
     axes[1].set_xlabel("Boosting Rounds")
     axes[1].set_ylabel("Accuracy")
     axes[1].set_title("Accuracy Curves")
     axes[1].legend()
 
     fig.tight_layout(rect=[0, 0.03, 1, 0.95])
-    fig.savefig(plot_path, dpi=150)
-    plt.close(fig)
+    plt.show(block=False)
+    plt.pause(0.001)
+
+
+def plot_final_fold_curves(evals_result: dict, outer_fold: int):
+    """Show the ONE diagnostic plot per outer fold: train/val loss & accuracy across rounds."""
+    if not SHOW_PLOTS or not evals_result:
+        return
+    tr_ll = evals_result.get("validation_0", {}).get("logloss", None)
+    va_ll = evals_result.get("validation_1", {}).get("logloss", None)
+    tr_er = evals_result.get("validation_0", {}).get("error", None)
+    va_er = evals_result.get("validation_1", {}).get("error", None)
+    if tr_ll is None or va_ll is None or tr_er is None or va_er is None:
+        return
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    fig.suptitle(f"Final Model Curves - Outer Fold {outer_fold}")
+
+    axes[0].plot(np.arange(1, len(tr_ll)+1), tr_ll, label="Train Logloss")
+    axes[0].plot(np.arange(1, len(va_ll)+1), va_ll, label="Val Logloss")
+    axes[0].set_xlabel("Boosting Rounds")
+    axes[0].set_ylabel("Log Loss")
+    axes[0].legend()
+    axes[0].set_title("Loss")
+
+    axes[1].plot(np.arange(1, len(tr_er)+1), 1.0 - np.asarray(tr_er), label="Train Acc")
+    axes[1].plot(np.arange(1, len(va_er)+1), 1.0 - np.asarray(va_er), label="Val Acc")
+    axes[1].set_xlabel("Boosting Rounds")
+    axes[1].set_ylabel("Accuracy")
+    axes[1].legend()
+    axes[1].set_title("Accuracy")
+
+    fig.tight_layout(rect=[0, 0.03, 1, 0.95])
+    plt.show(block=False)
+    plt.pause(0.001)
 
 
 def aggregate_best_params(best_params_per_fold):
@@ -358,6 +447,8 @@ def aggregate_best_params(best_params_per_fold):
 
     return aggregated
 
+
+# ==================== TRAINING LOOPS ====================
 
 def walk_forward_nested_cv(X, y, dates, outer_cv: int = 5, inner_cv: int = 3,
                            optuna_trials: int = 100, save_models: bool = True,
@@ -391,10 +482,12 @@ def walk_forward_nested_cv(X, y, dates, outer_cv: int = 5, inner_cv: int = 3,
         print(f"  Training period:   {dates_tr.min().date()} to {dates_tr.max().date()} ({len(X_tr)} samples)")
         print(f"  Test period:       {dates_te.min().date()} to {dates_te.max().date()} ({len(X_te)} samples)")
 
-        inner_splits = get_walk_forward_splits(len(X_tr), n_splits=inner_cv, min_train_ratio=0.6)
+        # Select top-K features using ONLY outer-train split, then restrict X_tr/X_te
+        selected_cols, full_rank = select_top_features_by_xgb(X_tr, y_tr, k=TOP_K_FEATURES)
+        X_tr = X_tr[selected_cols].copy()
+        X_te = X_te[selected_cols].copy()
 
-        fold_plot_dir = TRIAL_PLOTS_DIR / f"run{run_number}_outer_fold_{fold_idx:02d}"
-        fold_plot_dir.mkdir(parents=True, exist_ok=True)
+        inner_splits = get_walk_forward_splits(len(X_tr), n_splits=inner_cv, min_train_ratio=0.6)
 
         trial_count = [0]
 
@@ -417,8 +510,8 @@ def walk_forward_nested_cv(X, y, dates, outer_cv: int = 5, inner_cv: int = 3,
                 "subsample": trial.suggest_float("subsample", 0.6, 1.0),
                 "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
                 "gamma": trial.suggest_float("gamma", 0.01, 1.0, log=True),
-                "reg_alpha": trial.suggest_float("reg_alpha", 1e-8, 10.0, log=True),
-                "reg_lambda": trial.suggest_float("reg_lambda", 1e-8, 10.0, log=True),
+                "reg_alpha": trial.suggest_float("reg_alpha", 25, 30.0, log=True),
+                "reg_lambda": trial.suggest_float("reg_lambda", 25, 30.0, log=True),
                 "early_stopping_rounds": 50,
             }
 
@@ -440,7 +533,7 @@ def walk_forward_nested_cv(X, y, dates, outer_cv: int = 5, inner_cv: int = 3,
                     y_in_tr,
                     eval_set=[(X_in_tr, y_in_tr), (X_in_va, y_in_va)],
                     verbose=False,
-                    callbacks=[prune_cb],  # <- enables early pruning of bad trials
+                    callbacks=[prune_cb],
                 )
 
                 proba = model.predict_proba(X_in_va)[:, 1]
@@ -452,13 +545,12 @@ def walk_forward_nested_cv(X, y, dates, outer_cv: int = 5, inner_cv: int = 3,
                 train_error_curves.append(evals_result["validation_0"]["error"])
                 val_error_curves.append(evals_result["validation_1"]["error"])
 
-            plot_path = fold_plot_dir / f"trial_{trial.number:03d}_metrics.png"
+            # Optional per-trial visualization (disabled by default)
             plot_trial_metrics(
                 train_logloss_curves,
                 val_logloss_curves,
                 train_error_curves,
                 val_error_curves,
-                plot_path,
                 trial.number,
                 fold_idx,
             )
@@ -468,7 +560,7 @@ def walk_forward_nested_cv(X, y, dates, outer_cv: int = 5, inner_cv: int = 3,
         study = optuna.create_study(
             direction="maximize",
             sampler=optuna.samplers.TPESampler(seed=random.randint(0, 100000)),
-            pruner=MedianPruner(n_warmup_steps=10)  # warm up a bit before pruning
+            pruner=MedianPruner(n_warmup_steps=10)
         )
         study.optimize(inner_objective, n_trials=optuna_trials)
 
@@ -501,6 +593,9 @@ def walk_forward_nested_cv(X, y, dates, outer_cv: int = 5, inner_cv: int = 3,
         )
 
         evals_result = final_model.evals_result()
+        # ONE diagnostic plot for this outer fold
+        plot_final_fold_curves(evals_result, fold_idx)
+
         train_loss_curve = evals_result["validation_0"]["logloss"]
         val_loss_curve = evals_result["validation_1"]["logloss"]
         train_error_curve = evals_result["validation_0"]["error"]
@@ -589,6 +684,10 @@ def train_final_model_on_all_data(X, y, dates, aggregated_params, median_n_estim
     print("\n" + "=" * 70)
     print(f"  RUN {run_number} | TRAINING FINAL MODEL")
     print("=" * 70)
+
+    # Select top-K features on ALL data (for final prod model)
+    final_selected_cols, final_full_rank = select_top_features_by_xgb(X, y, k=TOP_K_FEATURES)
+    X = X[final_selected_cols].copy()
 
     final_params = {
         "objective": "binary:logistic",
@@ -732,7 +831,7 @@ def run_multiple_training_sessions(n_runs: int = 5, optuna_trials: int = 100,
 if __name__ == "__main__":
     try:
         run_multiple_training_sessions(
-            n_runs=100,
+            n_runs=25,
             optuna_trials=20,
             outer_cv=5,
             inner_cv=3,

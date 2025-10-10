@@ -395,7 +395,7 @@ if __name__ == "__main__":
     # Example custom configuration
     custom_config = Config(
         manual_threshold=0.50,
-        use_calibration=True,
+        use_calibration=False,
         calibration_type='isotonic',            # or 'sigmoid'
         calibration_backend='cv',               # 'cv' for CalibratedClassifierCV, 'simple' for direct mapping
         initial_bankroll=10000,

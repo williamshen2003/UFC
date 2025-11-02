@@ -1,6 +1,6 @@
 """
 Visualization Module for MMA Betting Analysis
-Handles all calibration plots and visual analytics
+Handles calibration plots and visual analytics.
 """
 import os
 import numpy as np
@@ -10,42 +10,24 @@ from sklearn.calibration import calibration_curve
 
 
 def create_calibration_plots(y_test: np.ndarray, y_pred_proba_list: List[np.ndarray], config) -> Dict[str, str]:
-    """
-    Main function to create all calibration plots based on configuration
-    """
-    # Create output directory
+    """Create all calibration plots based on configuration."""
     os.makedirs(config.output_dir, exist_ok=True)
-    calibration_dir = os.path.join(config.output_dir,
-                                   config.calibration_type if config.use_calibration else 'uncalibrated')
-    os.makedirs(calibration_dir, exist_ok=True)
+    cal_dir = os.path.join(config.output_dir, config.calibration_type if config.use_calibration else 'uncalibrated')
+    os.makedirs(cal_dir, exist_ok=True)
 
-    # Generate model names
     model_names = [os.path.splitext(f)[0] for f in config.model_files[:len(y_pred_proba_list)]]
-
     plot_files = {}
 
-    # Create calibration curves
     if config.calibration_type == 'range_based' and config.use_calibration:
-        plot_files['reliability'] = _create_range_based_reliability_diagram(
-            y_test, y_pred_proba_list, config, calibration_dir, model_names
-        )
+        plot_files['reliability'] = _create_range_based_diagram(y_test, y_pred_proba_list, config, cal_dir, model_names)
     else:
-        # Standard calibration curves
-        plot_files.update(_create_standard_calibration_curves(
-            y_test, y_pred_proba_list, config, calibration_dir, model_names
-        ))
+        plot_files.update(_create_standard_curves(y_test, y_pred_proba_list, config, cal_dir, model_names))
+        plot_files['reliability'] = _create_reliability_diagram(y_test, y_pred_proba_list, config, cal_dir, model_names)
 
-        # Reliability diagram
-        plot_files['reliability'] = _create_reliability_diagram(
-            y_test, y_pred_proba_list, config, calibration_dir, model_names
-        )
-
-    # Print calibration interpretation
     _print_calibration_interpretation(y_test, y_pred_proba_list, config, model_names)
 
-    # Print plot locations
-    print(
-        f"\n[{config.calibration_type.capitalize() if config.use_calibration else 'Uncalibrated'} Calibration Plots Generated]")
+    cal_type = config.calibration_type.capitalize() if config.use_calibration else 'Uncalibrated'
+    print(f"\n[{cal_type} Calibration Plots Generated]")
     for plot_type, filepath in plot_files.items():
         if filepath:
             print(f"{plot_type.replace('_', ' ').title()}: {filepath}")
@@ -53,68 +35,54 @@ def create_calibration_plots(y_test: np.ndarray, y_pred_proba_list: List[np.ndar
     return plot_files
 
 
-def _create_standard_calibration_curves(y_test: np.ndarray, y_pred_proba_list: List[np.ndarray],
-                                        config, output_dir: str, model_names: List[str]) -> Dict[str, str]:
-    """Create standard calibration curve plots"""
+def _create_standard_curves(y_test: np.ndarray, y_pred_proba_list: List[np.ndarray],
+                            config, output_dir: str, model_names: List[str]) -> Dict[str, str]:
+    """Create standard calibration curve plots."""
     plot_files = {}
 
-    # Individual model plots if ensemble
+    # Individual models
     if config.use_ensemble and len(y_pred_proba_list) > 1:
         plt.figure(figsize=(10, 6))
-        plt.plot([0, 1], [0, 1], 'k--', label='Perfectly calibrated')
-
+        plt.plot([0, 1], [0, 1], 'k--', label='Perfect')
         for i, y_pred_proba in enumerate(y_pred_proba_list):
             prob_true, prob_pred = calibration_curve(y_test, y_pred_proba[:, 1], n_bins=10)
-            cal_error = np.mean(np.abs(prob_true - prob_pred))
-            plt.plot(prob_pred, prob_true, 's-', label=f'{model_names[i]} (Error: {cal_error:.4f})')
-
+            cal_err = np.mean(np.abs(prob_true - prob_pred))
+            plt.plot(prob_pred, prob_true, 's-', label=f'{model_names[i]} ({cal_err:.4f})')
         plt.xlabel('Mean predicted probability')
         plt.ylabel('Fraction of positives')
-        plt.title(
-            f'Individual Models Calibration Curves ({config.calibration_type.capitalize() if config.use_calibration else "Uncalibrated"})')
+        cal_type = config.calibration_type.capitalize() if config.use_calibration else "Uncalibrated"
+        plt.title(f'Individual Models ({cal_type})')
         plt.legend(loc='best')
         plt.grid(True)
-
         filename = os.path.join(output_dir, 'individual_models_calibration.png')
         plt.savefig(filename, dpi=100, bbox_inches='tight')
         plt.close()
         plot_files['individual_models'] = filename
 
-    # Main model plot (ensemble or single)
+    # Main model
     plt.figure(figsize=(12, 8))
-    plt.plot([0, 1], [0, 1], 'k--', linewidth=2, label='Perfectly calibrated')
-
+    plt.plot([0, 1], [0, 1], 'k--', linewidth=2, label='Perfect')
     if config.use_ensemble:
-        y_pred_proba_avg = np.mean(y_pred_proba_list, axis=0)
-        label = 'Ensemble model'
+        y_pred_proba_avg, label = np.mean(y_pred_proba_list, axis=0), 'Ensemble'
         filename = os.path.join(output_dir, 'ensemble_calibration_curve.png')
     else:
-        y_pred_proba_avg = y_pred_proba_list[0]
-        label = model_names[0]
+        y_pred_proba_avg, label = y_pred_proba_list[0], model_names[0]
         filename = os.path.join(output_dir, f'{model_names[0]}_calibration_curve.png')
 
     prob_true, prob_pred = calibration_curve(y_test, y_pred_proba_avg[:, 1], n_bins=10)
     cal_error = np.mean(np.abs(prob_true - prob_pred))
-
     plt.plot(prob_pred, prob_true, 'o-', linewidth=2, markersize=8,
-             label=f'{label} (Calibration Error: {cal_error:.4f})')
-
-    # Add annotations
-    for i, (x, y) in enumerate(zip(prob_pred, prob_true)):
+             label=f'{label} (Error: {cal_error:.4f})')
+    for x, y in zip(prob_pred, prob_true):
         plt.annotate(f'({x:.2f}, {y:.2f})', (x, y), textcoords="offset points",
                      xytext=(0, 10), ha='center', fontsize=9)
-
     plt.xlabel('Mean predicted probability', fontsize=12)
-    plt.ylabel('Fraction of positives (true probability)', fontsize=12)
-    plt.title(
-        f'{label} Calibration Curve ({config.calibration_type.capitalize() if config.use_calibration else "Uncalibrated"})',
-        fontsize=14)
+    plt.ylabel('Fraction of positives', fontsize=12)
+    cal_type = config.calibration_type.capitalize() if config.use_calibration else "Uncalibrated"
+    plt.title(f'{label} Calibration Curve ({cal_type})', fontsize=14)
     plt.legend(loc='best', fontsize=12)
     plt.grid(True)
-
-    # Add interpretation text
     _add_interpretation_text(plt.gcf(), cal_error)
-
     plt.tight_layout()
     plt.subplots_adjust(bottom=0.2)
     plt.savefig(filename, dpi=100)

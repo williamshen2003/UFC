@@ -1,20 +1,18 @@
 """
 UFC Fight Analysis Module
-
-This module contains classes and functions for processing and analyzing UFC fight data.
-It handles data loading, preprocessing, feature engineering, and dataset preparation
-for machine learning. Includes integrated data leakage verification and advanced features.
+Processes UFC fight data with advanced feature engineering and leakage verification.
 """
-
-import warnings
+import warnings, os
 from pathlib import Path
+from datetime import datetime
+from typing import List, Tuple, Dict, Optional, Union
+from dataclasses import dataclass, field
+
 import pandas as pd
 import numpy as np
-from typing import List, Tuple, Dict, Optional, Union
-import os
-from datetime import datetime
+
 from src.data_processing.features.Elo import calculate_elo_ratings
-from src.data_processing.features.helper import DataUtils, OddsUtils, FighterUtils, DateUtils
+from src.data_processing.features.helper import DataUtils, OddsUtils, FighterUtils, DateUtils, CONFIG
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -47,29 +45,23 @@ class FightDataProcessor:
 
     def _load_csv(self, filepath: str) -> pd.DataFrame:
         """Load a CSV file into a DataFrame."""
-        filepath = Path(filepath.replace('/', os.sep))
-
-        if not filepath.is_absolute():
-            filepath = self.data_dir / filepath
-
-        filepath = filepath.expanduser()
-        if not filepath.exists():
-            raise FileNotFoundError(f"CSV file not found at {filepath}")
-
-        return pd.read_csv(filepath)
+        fp = Path(filepath.replace('/', os.sep))
+        if not fp.is_absolute():
+            fp = self.data_dir / fp
+        fp = fp.expanduser()
+        if not fp.exists():
+            raise FileNotFoundError(f"CSV file not found at {fp}")
+        return pd.read_csv(fp)
 
     def _save_csv(self, df: pd.DataFrame, filepath: str) -> None:
         """Save DataFrame to CSV file."""
-        filepath = Path(filepath.replace('/', os.sep))
-
-        if not filepath.is_absolute():
-            filepath = self.data_dir / filepath
-
-        filepath = filepath.expanduser()
-        filepath.parent.mkdir(parents=True, exist_ok=True)
-
-        df.to_csv(filepath, index=False)
-        print(f"Saved to {filepath}")
+        fp = Path(filepath.replace('/', os.sep))
+        if not fp.is_absolute():
+            fp = self.data_dir / fp
+        fp = fp.expanduser()
+        fp.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(fp, index=False)
+        print(f"Saved to {fp}")
 
     def combine_rounds_stats(self, file_path: str) -> pd.DataFrame:
         """Process round-level fight data into fighter career statistics."""
@@ -263,128 +255,53 @@ class FightDataProcessor:
         return final_combined_df
 
     def _calculate_defensive_stats(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        FEATURE 4: Calculate defensive statistics using opponent data.
-        Now that we have _b columns, we can calculate how well each fighter defends.
-        """
-        # Significant strikes absorbed per minute (opponent's strikes that landed on us)
-        df['sig_strikes_absorbed_per_min'] = self.utils.safe_divide(
-            df['significant_strikes_landed_b'],
-            df['fight_duration_minutes']
-        )
-
-        # Total strikes absorbed per minute
-        df['total_strikes_absorbed_per_min'] = self.utils.safe_divide(
-            df['total_strikes_landed_b'],
-            df['fight_duration_minutes']
-        )
-
-        # Takedown defense rate (percentage of opponent's takedowns we stuffed)
-        df['takedown_defense_rate'] = 1 - self.utils.safe_divide(
-            df['takedown_successful_b'],
-            df['takedown_attempted_b']
-        )
-
-        # Strike defense rate (percentage of opponent's strikes we avoided)
-        df['strike_defense_rate'] = 1 - self.utils.safe_divide(
-            df['significant_strikes_landed_b'],
-            df['significant_strikes_attempted_b']
-        )
-
-        # Damage ratio (our offense vs their offense)
-        df['damage_ratio'] = self.utils.safe_divide(
-            df['significant_strikes_landed'],
-            df['sig_strikes_absorbed_per_min'] + 1  # +1 to avoid division issues
-        )
-
-        # Submission defense (inverse of submission losses)
+        """Calculate defensive statistics using opponent data."""
+        fdm = df['fight_duration_minutes']
+        df['sig_strikes_absorbed_per_min'] = self.utils.safe_divide(df['significant_strikes_landed_b'], fdm)
+        df['total_strikes_absorbed_per_min'] = self.utils.safe_divide(df['total_strikes_landed_b'], fdm)
+        df['takedown_defense_rate'] = 1 - self.utils.safe_divide(df['takedown_successful_b'], df['takedown_attempted_b'])
+        df['strike_defense_rate'] = 1 - self.utils.safe_divide(df['significant_strikes_landed_b'], df['significant_strikes_attempted_b'])
+        df['damage_ratio'] = self.utils.safe_divide(df['significant_strikes_landed'], df['sig_strikes_absorbed_per_min'] + 1)
         df['submission_defense'] = (df['losses_by_submission'] == 0).astype(float)
-
-        # Control differential (our control time vs opponent's)
         if 'control' in df.columns and 'control_b' in df.columns:
             df['control_advantage'] = df['control'] - df['control_b']
-
         return df
 
     def _calculate_opponent_quality_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        FEATURE 1: Calculate opponent quality metrics.
-        Uses opponent data that's already time-frozen in the _b columns.
-        """
-        # Opponent's Elo at time of fight (quality indicator)
+        """Calculate opponent quality metrics from opponent data."""
         if 'pre_fight_elo_b' in df.columns:
             df['opponent_quality'] = df['pre_fight_elo_b']
-
-            # Quality-adjusted win (beating a strong opponent counts more)
             df['quality_adjusted_win'] = df['winner'] * (df['pre_fight_elo_b'] / 1500)
-
-        # Opponent's recent form
         if 'ewm_win_rate_b' in df.columns:
             df['opponent_recent_form'] = df['ewm_win_rate_b']
-
-        # Opponent's momentum
         if 'win_streak_b' in df.columns and 'loss_streak_b' in df.columns:
             df['opponent_momentum'] = df['win_streak_b'] - df['loss_streak_b']
-
-        # Opponent's finish rate
         if 'ewm_finish_rate_b' in df.columns:
             df['opponent_finish_threat'] = df['ewm_finish_rate_b']
-
         return df
 
     def _calculate_differential_and_ratio_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """Calculate differential and ratio features between fighter pairs."""
-        base_columns = [
-            'knockdowns', 'significant_strikes_landed', 'significant_strikes_attempted',
-            'significant_strikes_rate', 'total_strikes_landed', 'total_strikes_attempted',
-            'takedown_successful', 'takedown_attempted', 'takedown_rate', 'submission_attempt',
-            'reversals', 'head_landed', 'head_attempted', 'body_landed', 'body_attempted',
-            'leg_landed', 'leg_attempted', 'distance_landed', 'distance_attempted',
-            'clinch_landed', 'clinch_attempted', 'ground_landed', 'ground_attempted'
-        ]
+        base_cols = ['knockdowns', 'significant_strikes_landed', 'significant_strikes_attempted', 'significant_strikes_rate',
+                    'total_strikes_landed', 'total_strikes_attempted', 'takedown_successful', 'takedown_attempted', 'takedown_rate',
+                    'submission_attempt', 'reversals', 'head_landed', 'head_attempted', 'body_landed', 'body_attempted',
+                    'leg_landed', 'leg_attempted', 'distance_landed', 'distance_attempted', 'clinch_landed', 'clinch_attempted',
+                    'ground_landed', 'ground_attempted']
+        new_feature_cols = ['ewm_win_rate', 'ewm_finish_rate', 'ewm_strike_accuracy', 'win_rate_trajectory', 'finish_rate_trajectory',
+                           'momentum', 'layoff_penalty', 'rushed_return', 'ring_rust', 'striker_score', 'grappler_score',
+                           'pressure_score', 'style_confidence', 'sig_strikes_absorbed_per_min', 'takedown_defense_rate',
+                           'strike_defense_rate', 'damage_ratio', 'opponent_quality', 'opponent_recent_form', 'opponent_momentum']
+        other_cols = ['open_odds', 'closing_range_start', 'closing_range_end', 'pre_fight_elo', 'years_of_experience', 'win_streak',
+                     'loss_streak', 'days_since_last_fight', 'significant_strikes_landed_per_min', 'significant_strikes_attempted_per_min',
+                     'total_strikes_landed_per_min', 'total_strikes_attempted_per_min', 'takedowns_per_15min', 'knockdowns_per_15min',
+                     'total_fights', 'total_wins', 'total_losses', 'wins_by_ko', 'losses_by_ko', 'wins_by_submission',
+                     'losses_by_submission', 'wins_by_decision', 'losses_by_decision', 'win_rate_by_ko', 'loss_rate_by_ko',
+                     'win_rate_by_submission', 'loss_rate_by_submission', 'win_rate_by_decision', 'loss_rate_by_decision']
 
-        # Add new feature columns
-        new_feature_columns = [
-            'ewm_win_rate', 'ewm_finish_rate', 'ewm_strike_accuracy',
-            'win_rate_trajectory', 'finish_rate_trajectory', 'momentum',
-            'layoff_penalty', 'rushed_return', 'ring_rust',
-            'striker_score', 'grappler_score', 'pressure_score', 'style_confidence',
-            'sig_strikes_absorbed_per_min', 'takedown_defense_rate', 'strike_defense_rate',
-            'damage_ratio', 'opponent_quality', 'opponent_recent_form', 'opponent_momentum'
-        ]
-
-        other_columns = [
-            'open_odds', 'closing_range_start', 'closing_range_end', 'pre_fight_elo',
-            'years_of_experience', 'win_streak', 'loss_streak', 'days_since_last_fight',
-            'significant_strikes_landed_per_min', 'significant_strikes_attempted_per_min',
-            'total_strikes_landed_per_min', 'total_strikes_attempted_per_min', 'takedowns_per_15min',
-            'knockdowns_per_15min', 'total_fights', 'total_wins', 'total_losses',
-            'wins_by_ko', 'losses_by_ko', 'wins_by_submission', 'losses_by_submission', 'wins_by_decision',
-            'losses_by_decision', 'win_rate_by_ko', 'loss_rate_by_ko', 'win_rate_by_submission',
-            'loss_rate_by_submission', 'win_rate_by_decision', 'loss_rate_by_decision'
-        ]
-
-        columns_to_process = (
-            base_columns +
-            [f"{col}_career" for col in base_columns] +
-            [f"{col}_career_avg" for col in base_columns] +
-            other_columns +
-            new_feature_columns
-        )
-
-        # Calculate differential features
-        diff_features = {}
-        for col in columns_to_process:
-            if col in df.columns and f"{col}_b" in df.columns:
-                diff_features[f"{col}_diff"] = df[col] - df[f"{col}_b"]
-
-        # Calculate ratio features
-        ratio_features = {}
-        for col in columns_to_process:
-            if col in df.columns and f"{col}_b" in df.columns:
-                ratio_features[f"{col}_ratio"] = self.utils.safe_divide(df[col], df[f"{col}_b"])
-
-        return pd.concat([df, pd.DataFrame(diff_features), pd.DataFrame(ratio_features)], axis=1)
+        cols_to_process = base_cols + [f"{c}_career" for c in base_cols] + [f"{c}_career_avg" for c in base_cols] + other_cols + new_feature_cols
+        diff_feats = {f"{col}_diff": df[col] - df[f"{col}_b"] for col in cols_to_process if col in df.columns and f"{col}_b" in df.columns}
+        ratio_feats = {f"{col}_ratio": self.utils.safe_divide(df[col], df[f"{col}_b"]) for col in cols_to_process if col in df.columns and f"{col}_b" in df.columns}
+        return pd.concat([df, pd.DataFrame(diff_feats), pd.DataFrame(ratio_feats)], axis=1)
 
 
 class MatchupProcessor:
@@ -633,48 +550,25 @@ class MatchupProcessor:
         """Process betting odds for a fight."""
         return self.odds_utils.process_odds_pair(odds_a, odds_b)
 
-    def _process_elo_stats(self, current_fight: pd.Series) -> Tuple[List[float], float]:
+    def _calc_diff_ratio(self, val_a: float, val_b: float) -> Tuple[float, float]:
+        """Calculate diff and ratio for two values."""
+        return val_a - val_b, self.utils.safe_divide(val_a, val_b)
+
+    def _process_elo_stats(self, fight: pd.Series) -> Tuple[List[float], float]:
         """Process Elo rating statistics."""
-        elo_a = current_fight['pre_fight_elo']
-        elo_b = current_fight['pre_fight_elo_b']
-        elo_diff = current_fight['pre_fight_elo_diff']
+        a, b = fight['pre_fight_elo'], fight['pre_fight_elo_b']
+        a_prob = 1 / (1 + 10 ** ((b - a) / 400))
+        b_prob = 1 / (1 + 10 ** ((a - b) / 400))
+        return [a, b, fight['pre_fight_elo_diff'], a_prob, b_prob], self.utils.safe_divide(a, b)
 
-        a_win_prob = 1 / (1 + 10 ** ((elo_b - elo_a) / 400))
-        b_win_prob = 1 / (1 + 10 ** ((elo_a - elo_b) / 400))
-
-        elo_stats = [elo_a, elo_b, elo_diff, a_win_prob, b_win_prob]
-        elo_ratio = self.utils.safe_divide(elo_a, elo_b)
-
-        return elo_stats, elo_ratio
-
-    def _process_other_stats(self, current_fight: pd.Series) -> List[float]:
+    def _process_other_stats(self, fight: pd.Series) -> List[float]:
         """Process other fighter statistics."""
-        win_streak_a = current_fight['win_streak']
-        win_streak_b = current_fight['win_streak_b']
-        win_streak_diff = win_streak_a - win_streak_b
-        win_streak_ratio = self.utils.safe_divide(win_streak_a, win_streak_b)
-
-        loss_streak_a = current_fight['loss_streak']
-        loss_streak_b = current_fight['loss_streak_b']
-        loss_streak_diff = loss_streak_a - loss_streak_b
-        loss_streak_ratio = self.utils.safe_divide(loss_streak_a, loss_streak_b)
-
-        exp_a = current_fight['years_of_experience']
-        exp_b = current_fight['years_of_experience_b']
-        exp_diff = exp_a - exp_b
-        exp_ratio = self.utils.safe_divide(exp_a, exp_b)
-
-        days_since_a = current_fight['days_since_last_fight']
-        days_since_b = current_fight['days_since_last_fight_b']
-        days_since_diff = days_since_a - days_since_b
-        days_since_ratio = self.utils.safe_divide(days_since_a, days_since_b)
-
-        return [
-            win_streak_a, win_streak_b, win_streak_diff, win_streak_ratio,
-            loss_streak_a, loss_streak_b, loss_streak_diff, loss_streak_ratio,
-            exp_a, exp_b, exp_diff, exp_ratio,
-            days_since_a, days_since_b, days_since_diff, days_since_ratio
-        ]
+        stats = []
+        for col in ['win_streak', 'loss_streak', 'years_of_experience', 'days_since_last_fight']:
+            a, b = fight[col], fight[f'{col}_b']
+            diff, ratio = self._calc_diff_ratio(a, b)
+            stats.extend([a, b, diff, ratio])
+        return stats
 
     def _generate_column_names(
         self,
@@ -749,148 +643,53 @@ class MatchupProcessor:
 
         return pd.concat([df, pd.DataFrame(diff_columns), pd.DataFrame(ratio_columns)], axis=1)
 
-    def select_top_features(self, matchup_data_file: str, n_past_fights: int = 3) -> pd.DataFrame:
-        """
-        Select top ~150 features based on predictive importance.
-        Keeps individual fighter stats (_a, _b) and differentials (_diff).
-
-        Args:
-            matchup_data_file: Path to the matchup data CSV file
-            n_past_fights: Number of past fights used in feature engineering (default: 3)
-
-        Returns:
-            DataFrame with selected features
-        """
+    def select_top_features(self, matchup_data_file: str, n_past_fights: int = 3, config: 'ProcessingPipeline' = None) -> pd.DataFrame:
+        """Select top features based on predictive importance tiers from config."""
+        cfg = config or ProcessingPipeline()
         print("Loading matchup data for feature selection...")
         matchup_df = self.fight_processor._load_csv(matchup_data_file)
 
-        # Tier 1: Must-Keep Core Features (~30 features)
-        tier1_features = [
-            # Current fight odds
-            'current_fight_open_odds', 'current_fight_open_odds_b',
-            'current_fight_open_odds_diff', 'current_fight_open_odds_ratio',
-            'current_fight_closing_odds', 'current_fight_closing_odds_b',
-            'current_fight_closing_odds_diff', 'current_fight_closing_odds_ratio',
-            'current_fight_closing_open_diff_a', 'current_fight_closing_open_diff_b',
-            # Age
-            'current_fight_age', 'current_fight_age_b', 'current_fight_age_diff',
-            # ELO
-            'current_fight_pre_fight_elo_diff', 'current_fight_pre_fight_elo_ratio',
-            'current_fight_pre_fight_elo_a', 'current_fight_pre_fight_elo_b',
-            # Streaks
-            'current_fight_win_streak_diff', 'current_fight_win_streak_a', 'current_fight_win_streak_b',
-            'current_fight_loss_streak_diff', 'current_fight_loss_streak_a', 'current_fight_loss_streak_b',
-            # Days since last fight
-            'current_fight_days_since_last_diff', 'current_fight_days_since_last_ratio',
-            'current_fight_days_since_last_a', 'current_fight_days_since_last_b',
-            # Quick-win engineered features
-            'finish_rate_a', 'finish_rate_b', 'finish_rate_diff',
-            'activity_penalty_a', 'activity_penalty_b', 'activity_advantage',
-            'momentum_a', 'momentum_b', 'momentum_diff',
-        ]
+        # Build tiered features from config
+        tier2_features = [f for metric in cfg.tier2_metrics for f in [
+            f'matchup_{metric}_diff_avg_last_{n_past_fights}',
+            f'{metric}_fighter_a_avg_last_{n_past_fights}',
+            f'{metric}_fighter_b_avg_last_{n_past_fights}'
+        ]]
 
-        # Tier 2: Recent Performance Differentials (~40 features)
-        tier2_features = []
-        recent_metrics = [
-            'significant_strikes_landed', 'significant_strikes_rate', 'total_strikes_landed',
-            'head_landed', 'body_landed', 'leg_landed',
-            'distance_landed', 'clinch_landed', 'ground_landed',
-            'takedown_successful', 'takedown_rate', 'submission_attempt', 'control',
-            'knockdowns', 'knockdowns_per_15min'
-        ]
-        for metric in recent_metrics:
-            tier2_features.extend([
-                f'matchup_{metric}_diff_avg_last_{n_past_fights}',
-                f'{metric}_fighter_a_avg_last_{n_past_fights}',
-                f'{metric}_fighter_b_avg_last_{n_past_fights}'
-            ])
+        tier3_features = [f for metric in cfg.tier3_metrics for f in [
+            f'{metric}_fighter_a_avg_last_{n_past_fights}',
+            f'{metric}_fighter_b_avg_last_{n_past_fights}',
+            f'matchup_{metric}_diff_avg_last_{n_past_fights}'
+        ]]
 
-        # Tier 3: Advanced Metrics (~35 features)
-        tier3_features = []
-        advanced_metrics = [
-            'damage_ratio', 'takedown_defense_rate', 'strike_defense_rate',
-            'sig_strikes_absorbed_per_min', 'submission_defense', 'control_advantage',
-            'opponent_quality', 'quality_adjusted_win', 'opponent_recent_form',
-            'opponent_momentum', 'opponent_finish_threat',
-            'ewm_win_rate', 'ewm_finish_rate', 'ewm_strike_accuracy',
-            'win_rate_trajectory', 'finish_rate_trajectory'
-        ]
-        for metric in advanced_metrics:
-            tier3_features.extend([
-                f'{metric}_fighter_a_avg_last_{n_past_fights}',
-                f'{metric}_fighter_b_avg_last_{n_past_fights}'
-            ])
-            # Add diff if it exists
-            diff_col = f'matchup_{metric}_diff_avg_last_{n_past_fights}'
-            if diff_col not in tier3_features:
-                tier3_features.append(diff_col)
+        tier4_features = [f for metric in cfg.tier4_metrics for f in [
+            f'{metric}_fighter_a_avg_last_{n_past_fights}',
+            f'{metric}_fighter_b_avg_last_{n_past_fights}',
+            f'matchup_{metric}_diff_avg_last_{n_past_fights}'
+        ]]
 
-        # Tier 4: Fighting Style (~25 features)
-        tier4_features = []
-        style_metrics = [
-            'striker_score', 'grappler_score', 'pressure_score', 'style_confidence',
-            'significant_strikes_landed_per_min', 'total_strikes_landed_per_min',
-            'takedowns_per_15min'
-        ]
-        for metric in style_metrics:
-            tier4_features.extend([
-                f'{metric}_fighter_a_avg_last_{n_past_fights}',
-                f'{metric}_fighter_b_avg_last_{n_past_fights}'
-            ])
-            # Add diff if it exists
-            diff_col = f'matchup_{metric}_diff_avg_last_{n_past_fights}'
-            if diff_col not in tier4_features:
-                tier4_features.append(diff_col)
+        tier5_features = [f for metric in cfg.tier5_metrics for f in [
+            f'{metric}_fighter_a_avg_last_{n_past_fights}',
+            f'{metric}_fighter_b_avg_last_{n_past_fights}'
+        ]]
 
-        # Tier 5: Career Context (~20 features)
-        tier5_features = []
-        career_metrics = [
-            'wins_by_ko', 'wins_by_submission', 'win_rate_by_ko', 'win_rate_by_submission',
-            'significant_strikes_rate_career', 'takedown_rate_career', 'total_strikes_rate_career',
-            'layoff_penalty', 'ring_rust', 'years_of_experience'
-        ]
-        for metric in career_metrics:
-            tier5_features.extend([
-                f'{metric}_fighter_a_avg_last_{n_past_fights}',
-                f'{metric}_fighter_b_avg_last_{n_past_fights}'
-            ])
-
-        # Combine all tiers
-        selected_features = tier1_features + tier2_features + tier3_features + tier4_features + tier5_features
-
-        # Always keep these essential columns
-        essential_columns = ['winner', 'current_fight_date']
-
-        # Keep fighter names if they exist
+        selected_features = cfg.tier1 + tier2_features + tier3_features + tier4_features + tier5_features
+        essential = ['winner', 'current_fight_date']
         if 'fighter_a' in matchup_df.columns:
-            essential_columns.extend(['fighter_a', 'fighter_b'])
+            essential.extend(['fighter_a', 'fighter_b'])
 
-        # Filter to only existing columns
         available_features = [col for col in selected_features if col in matchup_df.columns]
-        available_essential = [col for col in essential_columns if col in matchup_df.columns]
-
-        # Combine and remove duplicates
+        available_essential = [col for col in essential if col in matchup_df.columns]
         final_columns = list(dict.fromkeys(available_essential + available_features))
-
-        # Create filtered dataframe
         filtered_df = matchup_df[final_columns].copy()
 
         print(f"\nFeature Selection Summary:")
-        print(f"  Original features: {len(matchup_df.columns)}")
-        print(f"  Selected features: {len(filtered_df.columns) - len(available_essential)}")
-        print(f"  Essential columns: {len(available_essential)}")
-        print(f"  Total columns: {len(filtered_df.columns)}")
-        print(f"\nFeature breakdown by tier:")
-        print(f"  Tier 1 (Core): {len([f for f in tier1_features if f in available_features])}")
-        print(f"  Tier 2 (Recent Performance): {len([f for f in tier2_features if f in available_features])}")
-        print(f"  Tier 3 (Advanced Metrics): {len([f for f in tier3_features if f in available_features])}")
-        print(f"  Tier 4 (Fighting Style): {len([f for f in tier4_features if f in available_features])}")
-        print(f"  Tier 5 (Career Context): {len([f for f in tier5_features if f in available_features])}")
+        print(f"  Original: {len(matchup_df.columns)} | Selected: {len(filtered_df.columns) - len(available_essential)} | Total: {len(filtered_df.columns)}")
+        print(f"  Tier 1 (Core): {len([f for f in cfg.tier1 if f in available_features])}")
+        print(f"  Tier 2-5: {len(available_features) - len([f for f in cfg.tier1 if f in available_features])}")
 
-        # Save the filtered data
         output_filename = f'matchup data/matchup_data_{n_past_fights}_avg_selected_features.csv'
         self.fight_processor._save_csv(filtered_df, output_filename)
-
         return filtered_df
 
     def split_train_val_test(
@@ -1034,38 +833,94 @@ class MatchupProcessor:
         return df.drop(columns=['fight_pair']).reset_index(drop=True)
 
 
-def main():
+# ==================== CONFIGURATION ==============================
+
+@dataclass
+class ProcessingPipeline:
+    """Pipeline configuration with feature tiers."""
+    enable_verification: bool = True
+    input_file: str = 'processed/ufc_fight_processed.csv'
+    test_start_date: str = '2025-01-01'
+    test_end_date: str = '2025-12-31'
+    years_back: int = 15
+    n_past_fights: int = 3
+    include_names: bool = True
+    select_features: bool = True
+    correlation_threshold: float = 0.95
+
+    # Tier 1: Core Features (~30 features)
+    tier1: List[str] = field(default_factory=lambda: [
+        'current_fight_open_odds', 'current_fight_open_odds_b', 'current_fight_open_odds_diff',
+        'current_fight_open_odds_ratio', 'current_fight_closing_odds', 'current_fight_closing_odds_b',
+        'current_fight_closing_odds_diff', 'current_fight_closing_odds_ratio',
+        'current_fight_closing_open_diff_a', 'current_fight_closing_open_diff_b',
+        'current_fight_age', 'current_fight_age_b', 'current_fight_age_diff',
+        'current_fight_pre_fight_elo_diff', 'current_fight_pre_fight_elo_ratio',
+        'current_fight_pre_fight_elo_a', 'current_fight_pre_fight_elo_b',
+        'current_fight_win_streak_diff', 'current_fight_win_streak_a', 'current_fight_win_streak_b',
+        'current_fight_loss_streak_diff', 'current_fight_loss_streak_a', 'current_fight_loss_streak_b',
+        'current_fight_days_since_last_diff', 'current_fight_days_since_last_ratio',
+        'current_fight_days_since_last_a', 'current_fight_days_since_last_b',
+        'finish_rate_a', 'finish_rate_b', 'finish_rate_diff', 'activity_penalty_a',
+        'activity_penalty_b', 'activity_advantage', 'momentum_a', 'momentum_b', 'momentum_diff',
+    ])
+
+    # Tier 2: Recent Performance Differentials (~40 features)
+    tier2_metrics: List[str] = field(default_factory=lambda: [
+        'significant_strikes_landed', 'significant_strikes_rate', 'total_strikes_landed',
+        'head_landed', 'body_landed', 'leg_landed', 'distance_landed', 'clinch_landed',
+        'ground_landed', 'takedown_successful', 'takedown_rate', 'submission_attempt',
+        'control', 'knockdowns', 'knockdowns_per_15min'
+    ])
+
+    # Tier 3: Advanced Metrics (~35 features)
+    tier3_metrics: List[str] = field(default_factory=lambda: [
+        'damage_ratio', 'takedown_defense_rate', 'strike_defense_rate', 'sig_strikes_absorbed_per_min',
+        'submission_defense', 'control_advantage', 'opponent_quality', 'quality_adjusted_win',
+        'opponent_recent_form', 'opponent_momentum', 'opponent_finish_threat', 'ewm_win_rate',
+        'ewm_finish_rate', 'ewm_strike_accuracy', 'win_rate_trajectory', 'finish_rate_trajectory'
+    ])
+
+    # Tier 4: Fighting Style (~25 features)
+    tier4_metrics: List[str] = field(default_factory=lambda: [
+        'striker_score', 'grappler_score', 'pressure_score', 'style_confidence',
+        'significant_strikes_landed_per_min', 'total_strikes_landed_per_min', 'takedowns_per_15min'
+    ])
+
+    # Tier 5: Career Context (~20 features)
+    tier5_metrics: List[str] = field(default_factory=lambda: [
+        'wins_by_ko', 'wins_by_submission', 'win_rate_by_ko', 'win_rate_by_submission',
+        'significant_strikes_rate_career', 'takedown_rate_career', 'total_strikes_rate_career',
+        'layoff_penalty', 'ring_rust', 'years_of_experience'
+    ])
+
+
+# ==================== MAIN ==============================
+
+def main(config: ProcessingPipeline = None):
     """Main execution function."""
-    fight_processor = FightDataProcessor(enable_verification=True)
-    matchup_processor = MatchupProcessor(data_dir=str(fight_processor.data_dir), enable_verification=True)
+    cfg = config or ProcessingPipeline()
+    print("Starting UFC data processing pipeline...")
 
-    print("Starting UFC data processing pipeline with advanced features and leakage verification...")
+    fp = FightDataProcessor(enable_verification=cfg.enable_verification)
+    mp = MatchupProcessor(data_dir=str(fp.data_dir), enable_verification=cfg.enable_verification)
 
-    fight_processor.combine_rounds_stats('processed/ufc_fight_processed.csv')
+    fp.combine_rounds_stats(cfg.input_file)
+    calculate_elo_ratings(str(fp.data_dir / 'processed' / 'combined_rounds.csv'))
+    fp.combine_fighters_stats('processed/combined_rounds.csv')
+    mp.create_matchup_data('processed/combined_sorted_fighter_stats.csv', cfg.n_past_fights, cfg.include_names)
 
-    combined_rounds_path = fight_processor.data_dir / 'processed' / 'combined_rounds.csv'
-    calculate_elo_ratings(str(combined_rounds_path))
+    matchup_file = f'matchup data/matchup_data_{cfg.n_past_fights}_avg_name.csv'
+    if cfg.select_features:
+        mp.select_top_features(matchup_file, n_past_fights=cfg.n_past_fights, config=cfg)
+        matchup_file = f'matchup data/matchup_data_{cfg.n_past_fights}_avg_selected_features.csv'
 
-    fight_processor.combine_fighters_stats('processed/combined_rounds.csv')
-
-    matchup_processor.create_matchup_data('processed/combined_sorted_fighter_stats.csv', 3, True)
-
-    # NEW: Select top features
-    matchup_processor.select_top_features('matchup data/matchup_data_3_avg_name.csv', n_past_fights=3)
-
-    # Use the filtered dataset for train/test split
-    matchup_processor.split_train_val_test(
-        'matchup data/matchup_data_3_avg_selected_features.csv',  # Use filtered data
-        '2025-01-01',
-        '2025-12-31',
-        15
-    )
-
-    print("\nData processing completed successfully with all advanced features!")
+    mp.split_train_val_test(matchup_file, cfg.test_start_date, cfg.test_end_date, cfg.years_back)
+    print("\nData processing completed successfully!")
 
 
 if __name__ == "__main__":
-    start_time = datetime.now()
-    main()
-    end_time = datetime.now()
-    print(f"\nTotal runtime: {end_time - start_time}")
+    start = datetime.now()
+    main(ProcessingPipeline())
+    elapsed = datetime.now() - start
+    print(f"Total runtime: {elapsed}")

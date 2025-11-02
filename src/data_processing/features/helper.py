@@ -1,47 +1,46 @@
 """
 UFC Data Analysis Utilities
-
-This module contains utility classes and functions for processing UFC fight data.
-Includes integrated data leakage verification checks and advanced feature engineering.
+Utilities for UFC fight data processing with leakage verification.
 """
-
 import numpy as np
 import pandas as pd
 from pathlib import Path
 from typing import List, Tuple, Dict, Optional, Union, Any
+from dataclasses import dataclass
+
+
+@dataclass
+class ProcessingConfig:
+    """Configuration for data processing."""
+    enable_verification: bool = True
+    optimal_days_between_fights: int = 135
+    layoff_std_dev: int = 90
+    ewm_span: int = 3
+    correlation_threshold: float = 0.95
+
+
+CONFIG = ProcessingConfig()
 
 
 class DataUtils:
     """General data processing utilities."""
 
     @staticmethod
-    def safe_divide(
-        numerator: Union[float, np.ndarray, pd.Series],
-        denominator: Union[float, np.ndarray, pd.Series],
-        default: float = 0
-    ) -> Union[float, np.ndarray, pd.Series]:
-        """
-        Safely divide with protection against division by zero.
-
-        Args:
-            numerator: Value or array to divide
-            denominator: Value or array to divide by
-            default: Default value when denominator is zero
-
-        Returns:
-            Result of division with zeros replaced by default
-        """
-        if isinstance(numerator, (pd.Series, pd.DataFrame)) or isinstance(denominator, (pd.Series, pd.DataFrame)):
-            result = pd.Series(numerator).div(pd.Series(denominator))
+    def safe_divide(num: Union[float, np.ndarray, pd.Series],
+                   denom: Union[float, np.ndarray, pd.Series],
+                   default: float = 0) -> Union[float, np.ndarray, pd.Series]:
+        """Safely divide with protection against division by zero."""
+        if isinstance(num, (pd.Series, pd.DataFrame)) or isinstance(denom, (pd.Series, pd.DataFrame)):
+            result = pd.Series(num).div(pd.Series(denom))
             return result.fillna(default).replace([np.inf, -np.inf], default)
-        elif isinstance(numerator, np.ndarray) and isinstance(denominator, np.ndarray):
-            result = np.zeros_like(numerator, dtype=float)
-            mask = denominator != 0
-            result[mask] = numerator[mask] / denominator[mask]
+        elif isinstance(num, np.ndarray) and isinstance(denom, np.ndarray):
+            result = np.zeros_like(num, dtype=float)
+            mask = denom != 0
+            result[mask] = num[mask] / denom[mask]
             result[~mask] = default
             return result
         else:
-            return numerator / denominator if denominator != 0 else default
+            return num / denom if denom != 0 else default
 
     def preprocess_data(self, ufc_stats: pd.DataFrame, fighter_stats: pd.DataFrame) -> pd.DataFrame:
         """Preprocess the UFC and fighter stats dataframes."""
@@ -324,23 +323,15 @@ class FighterUtils:
         return group
 
     def calculate_experience_and_days(self, group: pd.DataFrame) -> pd.DataFrame:
-        """
-        Calculate fighter experience and days between fights.
-        FEATURE 6: Includes layoff effects calculation.
-        """
+        """Calculate fighter experience and days between fights."""
+        cfg = CONFIG
         group = group.sort_values('fight_date')
         group['years_of_experience'] = (group['fight_date'] - group['fight_date'].iloc[0]).dt.days / 365.25
-        group['days_since_last_fight'] = (group['fight_date'] - group['fight_date'].shift()).dt.days
-
-        # FEATURE 6: Layoff Effects
-        optimal_days = 135
-        group['layoff_penalty'] = np.exp(
-            -((group['days_since_last_fight'].fillna(0) - optimal_days) ** 2) / (2 * 90 ** 2)
-        )
-
-        group['rushed_return'] = (group['days_since_last_fight'].fillna(999) < 60).astype(int)
-        group['ring_rust'] = (group['days_since_last_fight'].fillna(0) > 365).astype(int)
-
+        days_since = (group['fight_date'] - group['fight_date'].shift()).dt.days
+        group['days_since_last_fight'] = days_since
+        group['layoff_penalty'] = np.exp(-((days_since.fillna(0) - cfg.optimal_days_between_fights) ** 2) / (2 * cfg.layoff_std_dev ** 2))
+        group['rushed_return'] = (days_since.fillna(999) < 60).astype(int)
+        group['ring_rust'] = (days_since.fillna(0) > 365).astype(int)
         return group
 
     def update_streaks(self, group: pd.DataFrame) -> pd.DataFrame:
@@ -472,18 +463,14 @@ class FighterUtils:
                 group[f'losses_by_{outcome}'], group['total_losses']
             )
 
-        # FEATURE 2: Recent Form (Exponentially Weighted Moving Average)
-        # Now we can safely calculate these since the columns exist
-        group['ewm_win_rate'] = group['winner'].ewm(span=3, adjust=False, min_periods=1).mean()
-
-        ko_submission_mask = group['result'].isin([0, 1, 3])
-        group['ewm_finish_rate'] = ko_submission_mask.astype(float).ewm(span=3, adjust=False, min_periods=1).mean()
-
-        strike_acc = self.utils.safe_divide(
-            group['significant_strikes_landed'],
-            group['significant_strikes_attempted']
-        )
-        group['ewm_strike_accuracy'] = pd.Series(strike_acc).ewm(span=3, adjust=False, min_periods=1).mean()
+        # Recent Form (Exponentially Weighted Moving Average)
+        cfg = CONFIG
+        span = cfg.ewm_span
+        group['ewm_win_rate'] = group['winner'].ewm(span=span, adjust=False, min_periods=1).mean()
+        ko_sub = group['result'].isin([0, 1, 3]).astype(float)
+        group['ewm_finish_rate'] = ko_sub.ewm(span=span, adjust=False, min_periods=1).mean()
+        strike_acc = self.utils.safe_divide(group['significant_strikes_landed'], group['significant_strikes_attempted'])
+        group['ewm_strike_accuracy'] = pd.Series(strike_acc).ewm(span=span, adjust=False, min_periods=1).mean()
 
         # Performance Trajectory (now safe to calculate)
         career_win_rate = group['total_wins'] / group['total_fights']

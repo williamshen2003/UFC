@@ -1,11 +1,12 @@
 """
 Betting Module for MMA Analysis
-Handles all betting calculations, evaluations, and results display
+Handles betting calculations, evaluation, and results display.
 """
 import numpy as np
 import pandas as pd
 from datetime import datetime
 from typing import Dict, List, Tuple
+from dataclasses import dataclass
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
@@ -15,36 +16,26 @@ from rich.console import Group
 
 
 class BettingEvaluator:
-    """Evaluates betting strategies and calculates returns"""
+    """Evaluates betting strategies and calculates returns."""
 
     def __init__(self, config):
         self.config = config
         self.console = Console(width=160)
 
     def calculate_profit(self, odds: float, stake: float) -> float:
-        """Calculate potential profit based on American odds"""
-        if odds < 0:
-            return (100 / abs(odds)) * stake
-        else:
-            return (odds / 100) * stake
+        """Calculate profit from American odds."""
+        return (100 / abs(odds) if odds < 0 else odds / 100) * stake
 
     def calculate_kelly_fraction(self, p: float, b: float) -> float:
-        """Calculate Kelly criterion optimal bet size"""
-        q = 1 - p
-        return max(0, (p - (q / b)))
+        """Calculate Kelly criterion optimal bet size."""
+        return max(0, p - (1 - p) / b)
 
     def calculate_average_odds(self, open_odds: float, close_odds: float) -> float:
-        """Calculate average odds between opening and closing lines"""
-
+        """Calculate average odds between open and close."""
         def american_to_decimal(odds):
             return (odds / 100) + 1 if odds > 0 else (100 / abs(odds)) + 1
-
         avg_decimal = (american_to_decimal(open_odds) + american_to_decimal(close_odds)) / 2
-
-        if avg_decimal > 2:
-            return round((avg_decimal - 1) * 100)
-        else:
-            return round(-100 / (avg_decimal - 1))
+        return round((avg_decimal - 1) * 100) if avg_decimal > 2 else round(-100 / (avg_decimal - 1))
 
     def evaluate_bets(self, y_test: pd.Series, y_pred_proba_list: List[np.ndarray],
                       test_data: pd.DataFrame) -> Tuple:
@@ -258,70 +249,57 @@ class BettingEvaluator:
                 daily_fixed_bankrolls, daily_kelly_bankrolls)
 
     def _print_fight_results(self, confident_bets: List[Dict]):
-        """Print detailed results for each bet"""
+        """Print detailed results for each bet."""
         for bet in confident_bets:
-            fighter_a = bet['Fighter A'].title()
-            fighter_b = bet['Fighter B'].title()
+            fighter_a, fighter_b = bet['Fighter A'].title(), bet['Fighter B'].title()
             date_obj = datetime.strptime(bet['Date'], '%Y-%m-%d')
             formatted_date = date_obj.strftime('%B %d, %Y')
 
             # Calculate stake percentages
-            fixed_available = float(bet.get('Fixed Fraction Available Bankroll', '0').replace('$', ''))
+            fixed_avail = float(bet.get('Fixed Fraction Available Bankroll', '0').replace('$', ''))
             fixed_stake = float(bet.get('Fixed Fraction Stake', '0').replace('$', ''))
-            fixed_stake_pct = (fixed_stake / fixed_available) * 100 if fixed_available > 0 else 0
-
-            kelly_available = float(bet.get('Kelly Available Bankroll', '0').replace('$', ''))
+            fixed_pct = (fixed_stake / fixed_avail) * 100 if fixed_avail > 0 else 0
+            kelly_avail = float(bet.get('Kelly Available Bankroll', '0').replace('$', ''))
             kelly_stake = float(bet.get('Kelly Stake', '0').replace('$', ''))
-            kelly_stake_pct = (kelly_stake / kelly_available) * 100 if kelly_available > 0 else 0
+            kelly_pct = (kelly_stake / kelly_avail) * 100 if kelly_avail > 0 else 0
 
             # Create panels
             fixed_panel = Panel(
-                f"Starting Bankroll: {bet.get('Fixed Fraction Starting Bankroll', 'N/A')}\n"
-                f"Available Bankroll: {bet.get('Fixed Fraction Available Bankroll', 'N/A')}\n"
-                f"Stake: {bet.get('Fixed Fraction Stake', 'N/A')}\n"
-                f"Stake Percentage: {fixed_stake_pct:.2f}%\n"
-                f"Potential Profit: {bet.get('Fixed Fraction Potential Profit', 'N/A')}\n"
-                f"Bankroll After Bet: {bet.get('Fixed Fraction Bankroll After', 'N/A')}\n"
+                f"Starting: {bet.get('Fixed Fraction Starting Bankroll', 'N/A')}\n"
+                f"Available: {bet.get('Fixed Fraction Available Bankroll', 'N/A')}\n"
+                f"Stake: {bet.get('Fixed Fraction Stake', 'N/A')} ({fixed_pct:.2f}%)\n"
+                f"Potential: {bet.get('Fixed Fraction Potential Profit', 'N/A')}\n"
+                f"After: {bet.get('Fixed Fraction Bankroll After', 'N/A')}\n"
                 f"Profit: ${bet.get('Fixed Fraction Profit', 0):.2f}\n"
-                f"ROI (of available bankroll): {bet.get('Fixed Fraction ROI', 0):.2f}%",
-                title="Fixed Fraction",
-                expand=True,
-                width=42
+                f"ROI: {bet.get('Fixed Fraction ROI', 0):.2f}%",
+                title="Fixed Fraction", expand=True, width=42
             )
 
             kelly_panel = Panel(
-                f"Starting Bankroll: {bet.get('Kelly Starting Bankroll', 'N/A')}\n"
-                f"Available Bankroll: {bet.get('Kelly Available Bankroll', 'N/A')}\n"
-                f"Stake: {bet.get('Kelly Stake', 'N/A')}\n"
-                f"Stake Percentage: {kelly_stake_pct:.2f}%\n"
-                f"Potential Profit: {bet.get('Kelly Potential Profit', 'N/A')}\n"
-                f"Bankroll After Bet: {bet.get('Kelly Bankroll After', 'N/A')}\n"
+                f"Starting: {bet.get('Kelly Starting Bankroll', 'N/A')}\n"
+                f"Available: {bet.get('Kelly Available Bankroll', 'N/A')}\n"
+                f"Stake: {bet.get('Kelly Stake', 'N/A')} ({kelly_pct:.2f}%)\n"
+                f"Potential: {bet.get('Kelly Potential Profit', 'N/A')}\n"
+                f"After: {bet.get('Kelly Bankroll After', 'N/A')}\n"
                 f"Profit: ${bet.get('Kelly Profit', 0):.2f}\n"
-                f"ROI (of available bankroll): {bet.get('Kelly ROI', 0):.2f}%",
-                title="Kelly",
-                expand=True,
-                width=42
+                f"ROI: {bet.get('Kelly ROI', 0):.2f}%",
+                title="Kelly", expand=True, width=42
             )
 
             fight_info = Group(
-                Text(f"True Winner: {bet['True Winner'].title()}", style="green"),
-                Text(f"Predicted Winner: {bet['Predicted Winner'].title()}", style="blue"),
+                Text(f"True: {bet['True Winner'].title()}", style="green"),
+                Text(f"Predicted: {bet['Predicted Winner'].title()}", style="blue"),
                 Text(f"Confidence: {bet['Confidence']}", style="yellow"),
-                Text(f"Models Agreeing: {bet['Models Agreeing']}/5", style="cyan")
+                Text(f"Models: {bet['Models Agreeing']}/5", style="cyan")
             )
 
             main_panel = Panel(
-                Group(
-                    Panel(fight_info, title="Fight Information"),
-                    Columns([fixed_panel, kelly_panel], equal=False, expand=False, align="left")
-                ),
+                Group(Panel(fight_info, title="Fight Info"),
+                      Columns([fixed_panel, kelly_panel], equal=False, expand=False, align="left")),
                 title=f"Fight {bet['Fight']}: {fighter_a} vs {fighter_b} on {formatted_date}",
-                subtitle=f"Odds: {bet['Odds']}",
-                width=89
+                subtitle=f"Odds: {bet['Odds']}", width=89
             )
-
             self.console.print(main_panel, style="magenta")
-            self.console.print()
 
     def calculate_monthly_roi(self, daily_bankrolls: Dict, is_kelly: bool = False) -> Tuple[Dict, Dict, float]:
         """Calculate monthly ROI and profits"""
@@ -468,70 +446,49 @@ class BettingEvaluator:
                                kelly_total_volume: float, kelly_correct_bets: int,
                                kelly_total_bets: int, earliest_fight_date: str,
                                fixed_monthly_profit: Dict, kelly_monthly_profit: Dict):
-        """Print comprehensive betting results summary"""
+        """Print comprehensive betting results summary."""
         console = Console()
+        cfg = self.config
 
         # Calculate metrics
-        confident_accuracy = correct_confident_predictions / confident_predictions if confident_predictions > 0 else 0
-        fixed_accuracy = fixed_correct_bets / fixed_total_bets if fixed_total_bets > 0 else 0
-        kelly_accuracy = kelly_correct_bets / kelly_total_bets if kelly_total_bets > 0 else 0
+        conf_acc = correct_confident_predictions / confident_predictions if confident_predictions > 0 else 0
+        fixed_acc = fixed_correct_bets / fixed_total_bets if fixed_total_bets > 0 else 0
+        kelly_acc = kelly_correct_bets / kelly_total_bets if kelly_total_bets > 0 else 0
+        fixed_profit = sum(fixed_monthly_profit.values())
+        kelly_profit = sum(kelly_monthly_profit.values())
+        fixed_roi = (fixed_profit / cfg.initial_bankroll) * 100
+        kelly_roi = (kelly_profit / cfg.initial_bankroll) * 100
+        avg_fixed = fixed_total_volume / fixed_total_bets if fixed_total_bets > 0 else 0
+        avg_kelly = kelly_total_volume / kelly_total_bets if kelly_total_bets > 0 else 0
 
-        fixed_net_profit = sum(fixed_monthly_profit.values())
-        fixed_roi = (fixed_net_profit / self.config.initial_bankroll) * 100
+        console.print(Panel(f"Threshold: {cfg.manual_threshold:.4f}\nKelly ROI: {kelly_roi:.2f}%", title="Optimal Parameters"))
 
-        kelly_net_profit = sum(kelly_monthly_profit.values())
-        kelly_roi = (kelly_net_profit / self.config.initial_bankroll) * 100
-
-        avg_fixed_bet_size = fixed_total_volume / fixed_total_bets if fixed_total_bets > 0 else 0
-        avg_kelly_bet_size = kelly_total_volume / kelly_total_bets if kelly_total_bets > 0 else 0
-
-        fixed_scale = (avg_fixed_bet_size / fixed_net_profit) * 100 if fixed_net_profit != 0 else 0
-        kelly_scale = (avg_kelly_bet_size / kelly_net_profit) * 100 if kelly_net_profit != 0 else 0
-
-        # Print optimal parameters
-        console.print(Panel(f"Best confidence threshold: {self.config.manual_threshold:.4f}\n"
-                            f"Best Kelly ROI: {kelly_roi:.2f}%",
-                            title="Optimal Parameters"))
-
-        # Print betting results table
-        table = Table(title=f"Betting Results ({self.config.manual_threshold:.0%} confidence threshold)")
+        # Results table
+        table = Table(title=f"Betting Results ({cfg.manual_threshold:.0%} confidence)")
         table.add_column("Metric", style="cyan")
-        table.add_column("Fixed Fraction", justify="right", style="magenta")
+        table.add_column("Fixed", justify="right", style="magenta")
         table.add_column("Kelly", justify="right", style="green")
-
         table.add_row("Total fights", str(total_fights), str(total_fights))
-        table.add_row("Confident predictions", str(confident_predictions), str(confident_predictions))
-        table.add_row("Correct predictions", str(correct_confident_predictions), str(correct_confident_predictions))
-        table.add_row("Total bets", str(fixed_total_bets), str(kelly_total_bets))
-        table.add_row("Correct bets", str(fixed_correct_bets), str(kelly_correct_bets))
-        table.add_row("Betting Accuracy", f"{fixed_accuracy:.2%}", f"{kelly_accuracy:.2%}")
-        table.add_row("Confident Prediction Accuracy", f"{confident_accuracy:.2%}", f"{confident_accuracy:.2%}")
-
+        table.add_row("Predictions", str(confident_predictions), str(confident_predictions))
+        table.add_row("Correct", str(correct_confident_predictions), str(correct_confident_predictions))
+        table.add_row("Bets", str(fixed_total_bets), str(kelly_total_bets))
+        table.add_row("Wins", str(fixed_correct_bets), str(kelly_correct_bets))
+        table.add_row("Bet Accuracy", f"{fixed_acc:.2%}", f"{kelly_acc:.2%}")
+        table.add_row("Pred Accuracy", f"{conf_acc:.2%}", f"{conf_acc:.2%}")
         console.print(table)
 
-        # Print detailed results panels
+        # Panels
         fixed_panel = Panel(
-            f"Initial bankroll: ${self.config.initial_bankroll:.2f}\n"
-            f"Final bankroll: ${fixed_final_bankroll:.2f}\n"
-            f"Total volume: ${fixed_total_volume:.2f}\n"
-            f"Net profit: ${fixed_net_profit:.2f}\n"
-            f"ROI: {fixed_roi:.2f}%\n"
-            f"Fixed bet fraction: {self.config.fixed_bet_fraction:.3f}\n"
-            f"Average bet size: ${avg_fixed_bet_size:.2f}\n"
-            f"Risk: {fixed_scale:.2f}%",
-            title="Fixed Fraction Betting Results"
+            f"Initial: ${cfg.initial_bankroll:.2f}\nFinal: ${fixed_final_bankroll:.2f}\n"
+            f"Volume: ${fixed_total_volume:.2f}\nProfit: ${fixed_profit:.2f}\nROI: {fixed_roi:.2f}%\n"
+            f"Fraction: {cfg.fixed_bet_fraction:.3f}\nAvg Bet: ${avg_fixed:.2f}",
+            title="Fixed Fraction"
         )
 
         kelly_panel = Panel(
-            f"Initial bankroll: ${self.config.initial_bankroll:.2f}\n"
-            f"Final bankroll: ${kelly_final_bankroll:.2f}\n"
-            f"Total volume: ${kelly_total_volume:.2f}\n"
-            f"Net profit: ${kelly_net_profit:.2f}\n"
-            f"ROI: {kelly_roi:.2f}%\n"
-            f"Kelly fraction: {self.config.kelly_fraction:.3f}\n"
-            f"Average bet size: ${avg_kelly_bet_size:.2f}\n"
-            f"Risk: {kelly_scale:.2f}%",
-            title="Kelly Criterion Betting Results"
+            f"Initial: ${cfg.initial_bankroll:.2f}\nFinal: ${kelly_final_bankroll:.2f}\n"
+            f"Volume: ${kelly_total_volume:.2f}\nProfit: ${kelly_profit:.2f}\nROI: {kelly_roi:.2f}%\n"
+            f"Fraction: {cfg.kelly_fraction:.3f}\nAvg Bet: ${avg_kelly:.2f}",
+            title="Kelly Criterion"
         )
-
         console.print(Columns([fixed_panel, kelly_panel]))

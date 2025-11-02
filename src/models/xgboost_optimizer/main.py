@@ -369,8 +369,8 @@ CONFIG = Config(
     autosave_intermediate=True,
     autosave_include_test=False,
     optuna_objective="logloss",
-    val_logloss_save_max=0.69,
-    gap_max=0.06,
+    val_logloss_save_max=1.0,
+    gap_max=1.0,
 )
 
 training_controller = TrainingController()
@@ -382,7 +382,7 @@ set_matplotlib_backend(CONFIG.show_plots)
 if __name__ == "__main__":
     try:
         res = train_single_split(
-            optuna_trials=10,
+            optuna_trials=1000,
             include_odds=CONFIG.include_odds_columns,
             run_tag="ufc_xgb_single",
             use_gpu=True,

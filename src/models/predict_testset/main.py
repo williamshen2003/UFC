@@ -130,7 +130,7 @@ class ModelManager:
 
     def calibrate_predictions(self, X_val: pd.DataFrame, y_val: pd.Series, X_test: pd.DataFrame) -> List[np.ndarray]:
         if not self.config.use_calibration:
-            return [self._align_features(m, X_test) for m in self.models]
+            return [m.predict_proba(self._align_features(m, X_test)) for m in self.models]
 
         backend = (self.config.calibration_backend or 'cv').lower()
         if backend == 'cv':
@@ -309,15 +309,15 @@ class Config:
 # ============================== ENTRYPOINT ==============================
 
 CONFIG = Config(
-    use_calibration=True,
+    use_calibration=False,
     calibration_type='isotonic',
     calibration_backend='cv',
     initial_bankroll=10000,
-    kelly_fraction=0.5,
+    kelly_fraction=0.25,
     fixed_bet_fraction=0.1,
     model_dir='../../../saved_models/xgboost/single_split/',
     model_filename_pattern=r'ufc_xgb_single_(?:TRIAL\d{3}|FINAL).*\.json$',
-    use_ensemble=False,
+    use_ensemble=True,
     require_trained_encoder=True,
     enable_plots=True,
 )

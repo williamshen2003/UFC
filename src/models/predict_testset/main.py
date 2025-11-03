@@ -276,7 +276,7 @@ class Config:
     use_calibration: bool = True
     calibration_type: str = "isotonic"     # 'isotonic' | 'sigmoid'
     calibration_backend: str = "cv"        # 'cv' | 'simple'
-    require_trained_encoder: bool = False
+    require_trained_encoder: bool = True
 
     # === BETTING ===
     manual_threshold: float = 0.5

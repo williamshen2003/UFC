@@ -316,11 +316,19 @@ class MatchupProcessor:
         self.enable_verification = enable_verification
         self.leakage_warnings = []
 
-    def create_matchup_data(self, file_path: str, tester: int, include_names: bool = False) -> pd.DataFrame:
-        """Create matchup data for predictive modeling with advanced features."""
-        print(f"Creating matchup data with {tester} recent fights...")
+
+    def create_matchup_data(self, file_path: str, n_past_fights: int = 3, n_detailed_results: int = 2, include_names: bool = False) -> pd.DataFrame:
+        """
+        Create matchup data for predictive modeling with advanced features.
+
+        Args:
+            file_path: Path to the input CSV file
+            n_past_fights: Number of past fights to use for averaging statistics (default: 3)
+            n_detailed_results: Number of most recent fights to extract detailed results from (default: 2)
+            include_names: Whether to include fighter names in output
+        """
+        print(f"Creating matchup data with {n_past_fights} recent fights for averaging (detailed results from last {n_detailed_results})...")
         df = self.fight_processor._load_csv(file_path)
-        n_past_fights = 6 - tester
 
         columns_to_exclude = [
             'fighter', 'id', 'fighter_b', 'fight_date', 'fight_date_b',
@@ -337,11 +345,11 @@ class MatchupProcessor:
         method_columns = ['winner']
 
         matchup_data = self._process_matchups(
-            df, features_to_include, method_columns, n_past_fights, tester, include_names
+            df, features_to_include, method_columns, n_past_fights, n_detailed_results, include_names
         )
 
         column_names = self._generate_column_names(
-            features_to_include, method_columns, n_past_fights, tester, include_names
+            features_to_include, method_columns, n_past_fights, n_detailed_results, include_names
         )
         matchup_df = pd.DataFrame(matchup_data, columns=column_names)
 
@@ -366,6 +374,45 @@ class MatchupProcessor:
         self.fight_processor._save_csv(matchup_df, output_filename)
 
         return matchup_df
+
+    def create_matchup_files(self, file_path: str, n_past_fights: int = 3, n_detailed_results: int = 2, include_names: bool = True, select_features: bool = True) -> Dict[str, str]:
+        """
+        Create and save all matchup files for predictive modeling.
+
+        Args:
+            file_path: Path to the input CSV file
+            n_past_fights: Number of past fights to use for averaging statistics
+            n_detailed_results: Number of most recent fights to extract detailed results from
+            include_names: Whether to include fighter names in output
+            select_features: Whether to apply feature selection
+
+        Returns:
+            Dictionary containing paths to created files
+        """
+        print(f"Creating matchup files with {n_past_fights} recent fights...")
+
+        # Create base matchup data
+        matchup_df = self.create_matchup_data(file_path, n_past_fights, n_detailed_results, include_names)
+
+        output_files = {
+            'raw_matchup': f'matchup data/matchup_data_{n_past_fights}_avg{"_name" if include_names else ""}.csv'
+        }
+
+        # Apply feature selection if requested
+        if select_features:
+            print("Applying feature selection...")
+            cfg = ProcessingPipeline()
+            selected_df = self.select_top_features(
+                output_files['raw_matchup'],
+                n_past_fights=n_past_fights,
+                config=cfg
+            )
+            output_files['selected_features'] = f'matchup data/matchup_data_{n_past_fights}_avg_selected_features.csv'
+
+        print(f"Matchup files created successfully!")
+        print(f"Output files: {output_files}")
+
+        return output_files
 
     def _add_quick_win_features(self, df: pd.DataFrame, n_fights: int) -> pd.DataFrame:
         """
@@ -420,7 +467,7 @@ class MatchupProcessor:
         features_to_include: List[str],
         method_columns: List[str],
         n_past_fights: int,
-        tester: int,
+        n_detailed_results: int,
         include_names: bool
     ) -> List[List]:
         """Process each fight to create matchup feature vectors."""
@@ -475,8 +522,8 @@ class MatchupProcessor:
             fighter_a_features = fighter_a_df[features_to_include].mean().values
             fighter_b_features = fighter_b_df[features_to_include].mean().values
 
-            num_a_results = min(len(fighter_a_df), tester)
-            num_b_results = min(len(fighter_b_df), tester)
+            num_a_results = min(len(fighter_a_df), n_detailed_results)
+            num_b_results = min(len(fighter_b_df), n_detailed_results)
 
             results_fighter_a = fighter_a_df[['result', 'winner', 'weight_class', 'scheduled_rounds']].head(
                 num_a_results).values.flatten() if num_a_results > 0 else np.array([])
@@ -486,13 +533,13 @@ class MatchupProcessor:
 
             results_fighter_a = np.pad(
                 results_fighter_a,
-                (0, tester * 4 - len(results_fighter_a)),
+                (0, n_detailed_results * 4 - len(results_fighter_a)),
                 'constant',
                 constant_values=np.nan
             )
             results_fighter_b = np.pad(
                 results_fighter_b,
-                (0, tester * 4 - len(results_fighter_b)),
+                (0, n_detailed_results * 4 - len(results_fighter_b)),
                 'constant',
                 constant_values=np.nan
             )
@@ -575,12 +622,12 @@ class MatchupProcessor:
         features_to_include: List[str],
         method_columns: List[str],
         n_past_fights: int,
-        tester: int,
+        n_detailed_results: int,
         include_names: bool
     ) -> List[str]:
         """Generate column names for the matchup DataFrame."""
         results_columns = []
-        for i in range(1, tester + 1):
+        for i in range(1, n_detailed_results + 1):
             results_columns += [
                 f"result_fight_{i}", f"winner_fight_{i}", f"weight_class_fight_{i}", f"scheduled_rounds_fight_{i}",
                 f"result_b_fight_{i}", f"winner_b_fight_{i}", f"weight_class_b_fight_{i}",
@@ -900,17 +947,18 @@ class ProcessingPipeline:
 def main(config: ProcessingPipeline = None):
     """Main execution function."""
     cfg = config or ProcessingPipeline()
-    print("Starting UFC data processing pipeline...")
 
     fp = FightDataProcessor(enable_verification=cfg.enable_verification)
     mp = MatchupProcessor(data_dir=str(fp.data_dir), enable_verification=cfg.enable_verification)
 
+    # Full pipeline mode
+    print("Starting UFC data processing pipeline...")
     fp.combine_rounds_stats(cfg.input_file)
     calculate_elo_ratings(str(fp.data_dir / 'processed' / 'combined_rounds.csv'))
     fp.combine_fighters_stats('processed/combined_rounds.csv')
-    mp.create_matchup_data('processed/combined_sorted_fighter_stats.csv', cfg.n_past_fights, cfg.include_names)
+    mp.create_matchup_data('processed/combined_sorted_fighter_stats.csv', cfg.n_past_fights, include_names=cfg.include_names)
 
-    matchup_file = f'matchup data/matchup_data_{cfg.n_past_fights}_avg_name.csv'
+    matchup_file = f'matchup data/matchup_data_{cfg.n_past_fights}_avg{"_name" if cfg.include_names else ""}.csv'
     if cfg.select_features:
         mp.select_top_features(matchup_file, n_past_fights=cfg.n_past_fights, config=cfg)
         matchup_file = f'matchup data/matchup_data_{cfg.n_past_fights}_avg_selected_features.csv'

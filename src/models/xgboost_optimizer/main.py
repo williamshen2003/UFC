@@ -346,7 +346,7 @@ set_matplotlib_backend(CONFIG.show_plots)
 if __name__ == "__main__":
     try:
         res = train_single_split(
-            optuna_trials=10000,
+            optuna_trials=100,
             include_odds=CONFIG.include_odds_columns,
             run_tag="ufc_xgb_single",
             use_gpu=True,

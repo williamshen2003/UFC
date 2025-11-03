@@ -45,6 +45,9 @@ class BettingEvaluator:
         # Store fight data by unique identifier
         fight_data = {}
 
+        # Determine number of models available
+        num_models = len(y_pred_proba_list) if self.config.use_ensemble else 1
+
         # Build mapping of fights to predictions
         for i in range(len(test_data)):
             row = test_data.iloc[i]
@@ -64,7 +67,8 @@ class BettingEvaluator:
                 'row': row,
                 'prediction': y_pred_proba_avg,
                 'true_outcome': y_test.iloc[i],
-                'models_agreeing': models_agreeing
+                'models_agreeing': models_agreeing,
+                'num_models': num_models
             }
 
         # Initialize tracking variables
@@ -107,6 +111,7 @@ class BettingEvaluator:
                 y_pred_proba_avg = fight_info['prediction']
                 true_outcome = fight_info['true_outcome']
                 models_agreeing = fight_info['models_agreeing']
+                num_models = fight_info['num_models']
 
                 # Determine winners
                 true_winner = row['fighter_a'] if true_outcome == 1 else row['fighter_b']
@@ -125,9 +130,8 @@ class BettingEvaluator:
 
                 # Place bets if confidence meets threshold
                 # min_models: requires this many models to agree on prediction direction
-                # For 5-model ensembles: 3 = 60% agreement (moderate, allows some disagreement)
-                # For larger ensembles: 3 is very lenient, consider using percentage-based filtering
-                min_models = 3 if self.config.use_ensemble else 1
+                # Uses 60% agreement threshold scaled to actual number of models available
+                min_models = max(1, int(np.ceil(num_models * 0.6))) if self.config.use_ensemble else 1
                 if winning_probability >= self.config.manual_threshold and models_agreeing >= min_models:
                     # Get odds
                     if predicted_winner == row['fighter_a']:
@@ -176,7 +180,8 @@ class BettingEvaluator:
                         'Predicted Winner': predicted_winner,
                         'Confidence': f"{winning_probability:.2%}",
                         'Odds': odds,
-                        'Models Agreeing': models_agreeing
+                        'Models Agreeing': models_agreeing,
+                        'Num Models': num_models
                     }
 
                     # Process fixed bet
@@ -293,7 +298,7 @@ class BettingEvaluator:
                 Text(f"True: {bet['True Winner'].title()}", style="green"),
                 Text(f"Predicted: {bet['Predicted Winner'].title()}", style="blue"),
                 Text(f"Confidence: {bet['Confidence']}", style="yellow"),
-                Text(f"Models: {bet['Models Agreeing']}/5", style="cyan")
+                Text(f"Models: {bet['Models Agreeing']}/{bet['Num Models']}", style="cyan")
             )
 
             main_panel = Panel(

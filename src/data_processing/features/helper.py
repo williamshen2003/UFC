@@ -21,6 +21,31 @@ class ProcessingConfig:
 
 CONFIG = ProcessingConfig()
 
+# Feature lists for matchup building
+BASE_COLS = [
+    'knockdowns', 'significant_strikes_landed', 'significant_strikes_attempted', 'significant_strikes_rate',
+    'total_strikes_landed', 'total_strikes_attempted', 'takedown_successful', 'takedown_attempted', 'takedown_rate',
+    'submission_attempt', 'reversals', 'head_landed', 'head_attempted', 'body_landed', 'body_attempted',
+    'leg_landed', 'leg_attempted', 'distance_landed', 'distance_attempted', 'clinch_landed', 'clinch_attempted',
+    'ground_landed', 'ground_attempted'
+]
+
+NEW_FEATURE_COLS = [
+    'ewm_win_rate', 'ewm_finish_rate', 'ewm_strike_accuracy', 'win_rate_trajectory', 'finish_rate_trajectory',
+    'momentum', 'layoff_penalty', 'rushed_return', 'ring_rust', 'striker_score', 'grappler_score',
+    'pressure_score', 'style_confidence', 'sig_strikes_absorbed_per_min', 'takedown_defense_rate',
+    'strike_defense_rate', 'damage_ratio', 'opponent_quality', 'opponent_recent_form', 'opponent_momentum'
+]
+
+OTHER_COLS = [
+    'open_odds', 'closing_range_start', 'closing_range_end', 'pre_fight_elo', 'years_of_experience', 'win_streak',
+    'loss_streak', 'days_since_last_fight', 'significant_strikes_landed_per_min', 'significant_strikes_attempted_per_min',
+    'total_strikes_landed_per_min', 'total_strikes_attempted_per_min', 'takedowns_per_15min', 'knockdowns_per_15min',
+    'total_fights', 'total_wins', 'total_losses', 'wins_by_ko', 'losses_by_ko', 'wins_by_submission',
+    'losses_by_submission', 'wins_by_decision', 'losses_by_decision', 'win_rate_by_ko', 'loss_rate_by_ko',
+    'win_rate_by_submission', 'loss_rate_by_submission', 'win_rate_by_decision', 'loss_rate_by_decision'
+]
+
 
 class DataUtils:
     """General data processing utilities."""
@@ -537,9 +562,9 @@ class FighterUtils:
             print(f"Checks passed: {passed}/{total}")
 
             if passed == total:
-                print("✅ All verification checks passed - No leakage detected")
+                print("[PASS] All verification checks passed - No leakage detected")
             else:
-                print("❌ Some verification checks failed - Review the output above")
+                print("[FAIL] Some verification checks failed - Review the output above")
 
             print("="*60)
 
@@ -559,3 +584,164 @@ class DateUtils:
                 return pd.to_datetime(date_str, format='%b %d, %Y')
             except ValueError:
                 return pd.NaT
+
+
+class MatchupBuilder:
+    """Builds individual matchup feature vectors - shared utility for batch and single matchups."""
+
+    def __init__(self, data_dir: str = "../../../data", enable_verification: bool = True):
+        """Initialize the builder."""
+        # Avoid circular import by importing here
+        from src.data_processing.cleaning.data_cleaner import FightDataProcessor
+
+        self.fight_processor = FightDataProcessor(data_dir, enable_verification=enable_verification)
+        self.data_dir = self.fight_processor.data_dir
+        self.utils = DataUtils()
+        self.odds_utils = OddsUtils(data_dir=self.data_dir)
+
+    def _generate_base_column_names(self, features_to_include: List[str], n_past_fights: int, n_detailed_results: int) -> Tuple[List[str], List[str], List[str], List[str]]:
+        """Generate result, feature, odds_age, and elo column names."""
+        results_columns = []
+        for i in range(1, n_detailed_results + 1):
+            results_columns += [
+                f"result_fight_{i}", f"winner_fight_{i}", f"weight_class_fight_{i}", f"scheduled_rounds_fight_{i}",
+                f"result_b_fight_{i}", f"winner_b_fight_{i}", f"weight_class_b_fight_{i}",
+                f"scheduled_rounds_b_fight_{i}"
+            ]
+
+        feature_columns = (
+            [f"{feature}_fighter_avg_last_{n_past_fights}" for feature in features_to_include] +
+            [f"{feature}_fighter_b_avg_last_{n_past_fights}" for feature in features_to_include]
+        )
+
+        odds_age_columns = [
+            'current_fight_open_odds', 'current_fight_open_odds_b', 'current_fight_open_odds_diff',
+            'current_fight_open_odds_ratio',
+            'current_fight_closing_odds', 'current_fight_closing_odds_b', 'current_fight_closing_odds_diff',
+            'current_fight_closing_odds_ratio', 'current_fight_closing_open_diff_a',
+            'current_fight_closing_open_diff_b',
+            'current_fight_age', 'current_fight_age_b', 'current_fight_age_diff', 'current_fight_age_ratio'
+        ]
+
+        elo_columns = [
+            'current_fight_pre_fight_elo_a', 'current_fight_pre_fight_elo_b', 'current_fight_pre_fight_elo_diff',
+            'current_fight_pre_fight_elo_a_win_chance', 'current_fight_pre_fight_elo_b_win_chance',
+            'current_fight_pre_fight_elo_ratio', 'current_fight_win_streak_a', 'current_fight_win_streak_b',
+            'current_fight_win_streak_diff', 'current_fight_win_streak_ratio', 'current_fight_loss_streak_a',
+            'current_fight_loss_streak_b', 'current_fight_loss_streak_diff', 'current_fight_loss_streak_ratio',
+            'current_fight_years_experience_a', 'current_fight_years_experience_b',
+            'current_fight_years_experience_diff',
+            'current_fight_years_experience_ratio', 'current_fight_days_since_last_a',
+            'current_fight_days_since_last_b', 'current_fight_days_since_last_diff',
+            'current_fight_days_since_last_ratio'
+        ]
+
+        return results_columns, feature_columns, odds_age_columns, elo_columns
+
+    def build_single_matchup(
+        self,
+        df: pd.DataFrame,
+        fighter_a_name: str,
+        fighter_b_name: str,
+        current_fight_row: pd.Series,
+        features_to_include: List[str],
+        n_past_fights: int,
+        n_detailed_results: int
+    ) -> Tuple[np.ndarray, List[str]]:
+        """
+        Build a single matchup feature vector.
+        Returns (feature_vector, column_names)
+        """
+        fighter_a_df = df[
+            (df['fighter'] == fighter_a_name) &
+            (df['fight_date'] < current_fight_row['fight_date'])
+        ].sort_values(by='fight_date', ascending=False).head(n_past_fights)
+
+        fighter_b_df = df[
+            (df['fighter'] == fighter_b_name) &
+            (df['fight_date'] < current_fight_row['fight_date'])
+        ].sort_values(by='fight_date', ascending=False).head(n_past_fights)
+
+        if len(fighter_a_df) == 0 or len(fighter_b_df) == 0:
+            return None, None
+
+        # Extract features
+        fighter_a_features = fighter_a_df[features_to_include].mean().values
+        fighter_b_features = fighter_b_df[features_to_include].mean().values
+
+        # Extract detailed results
+        num_a_results = min(len(fighter_a_df), n_detailed_results)
+        num_b_results = min(len(fighter_b_df), n_detailed_results)
+
+        results_fighter_a = fighter_a_df[['result', 'winner', 'weight_class', 'scheduled_rounds']].head(
+            num_a_results).values.flatten() if num_a_results > 0 else np.array([])
+
+        results_fighter_b = fighter_b_df[['result_b', 'winner_b', 'weight_class_b', 'scheduled_rounds_b']].head(
+            num_b_results).values.flatten() if num_b_results > 0 else np.array([])
+
+        results_fighter_a = np.pad(
+            results_fighter_a,
+            (0, n_detailed_results * 4 - len(results_fighter_a)),
+            'constant',
+            constant_values=np.nan
+        )
+        results_fighter_b = np.pad(
+            results_fighter_b,
+            (0, n_detailed_results * 4 - len(results_fighter_b)),
+            'constant',
+            constant_values=np.nan
+        )
+
+        # Process odds
+        current_fight_odds, current_fight_odds_diff, current_fight_odds_ratio = self.odds_utils.process_odds_pair(
+            current_fight_row['open_odds'], current_fight_row['open_odds_b']
+        )
+
+        current_fight_closing_odds, current_fight_closing_odds_diff, current_fight_closing_odds_ratio = self.odds_utils.process_odds_pair(
+            current_fight_row['closing_range_end'], current_fight_row['closing_range_end_b']
+        )
+
+        current_fight_closing_open_diff_a = current_fight_row['closing_range_end'] - current_fight_row['open_odds']
+        current_fight_closing_open_diff_b = current_fight_row['closing_range_end_b'] - current_fight_row['open_odds_b']
+
+        # Process stats
+        current_fight_ages = [current_fight_row['age'], current_fight_row['age_b']]
+        current_fight_age_diff = current_fight_row['age'] - current_fight_row['age_b']
+        current_fight_age_ratio = self.utils.safe_divide(current_fight_row['age'], current_fight_row['age_b'])
+
+        elo_stats, elo_ratio = self._process_elo_stats(current_fight_row)
+        other_stats = self._process_other_stats(current_fight_row)
+
+        combined_features = np.concatenate([
+            fighter_a_features, fighter_b_features, results_fighter_a, results_fighter_b,
+            current_fight_odds, [current_fight_odds_diff, current_fight_odds_ratio],
+            current_fight_closing_odds, [current_fight_closing_odds_diff, current_fight_closing_odds_ratio,
+                                        current_fight_closing_open_diff_a, current_fight_closing_open_diff_b],
+            current_fight_ages, [current_fight_age_diff, current_fight_age_ratio],
+            elo_stats, [elo_ratio], other_stats
+        ])
+
+        # Generate column names using shared helper
+        results_columns, feature_columns, odds_age_columns, elo_columns = self._generate_base_column_names(
+            features_to_include, n_past_fights, n_detailed_results
+        )
+        column_names = feature_columns + results_columns + odds_age_columns + elo_columns
+
+        return combined_features, column_names
+
+    def _process_elo_stats(self, fight: pd.Series) -> Tuple[List[float], float]:
+        """Process Elo rating statistics."""
+        a, b = fight['pre_fight_elo'], fight['pre_fight_elo_b']
+        a_prob = 1 / (1 + 10 ** ((b - a) / 400))
+        b_prob = 1 / (1 + 10 ** ((a - b) / 400))
+        return [a, b, fight['pre_fight_elo_diff'], a_prob, b_prob], self.utils.safe_divide(a, b)
+
+    def _process_other_stats(self, fight: pd.Series) -> List[float]:
+        """Process other fighter statistics."""
+        stats = []
+        for col in ['win_streak', 'loss_streak', 'years_of_experience', 'days_since_last_fight']:
+            a, b = fight[col], fight[f'{col}_b']
+            diff = a - b
+            ratio = self.utils.safe_divide(a, b)
+            stats.extend([a, b, diff, ratio])
+        return stats

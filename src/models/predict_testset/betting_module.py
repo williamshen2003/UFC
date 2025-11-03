@@ -124,7 +124,10 @@ class BettingEvaluator:
                     correct_confident_predictions += 1
 
                 # Place bets if confidence meets threshold
-                min_models = 5 if self.config.use_ensemble else 1
+                # min_models: requires this many models to agree on prediction direction
+                # For 5-model ensembles: 3 = 60% agreement (moderate, allows some disagreement)
+                # For larger ensembles: 3 is very lenient, consider using percentage-based filtering
+                min_models = 3 if self.config.use_ensemble else 1
                 if winning_probability >= self.config.manual_threshold and models_agreeing >= min_models:
                     # Get odds
                     if predicted_winner == row['fighter_a']:

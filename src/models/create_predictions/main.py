@@ -443,7 +443,7 @@ class PredictionEvaluator:
         # EV calculation (only if odds available)
         if has_odds:
             b = odds / 100 if odds > 0 else 100 / abs(odds)
-            ev = (pred_prob * (b * 100)) - ((1 - pred_prob) * 100)
+            ev = (pred_prob * 100 * (b - 1)) - ((1 - pred_prob) * 100)
             print(f"\nExpected Value per $100: ${ev:.2f}")
             print(f"Status: {'POSITIVE [YES]' if ev > 0 else 'NEGATIVE [NO]'}")
         else:

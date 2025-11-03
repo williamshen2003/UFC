@@ -258,50 +258,14 @@ def train_single_split(optuna_trials=10, include_odds=True, run_tag="ufc_xgb_sin
     best_params = study.best_params
     print(f"\nBest VAL objective ({cfg.optuna_objective}): {study.best_value:.4f}")
     print("Best params:", json.dumps(best_params, indent=2))
-
-    final_stage_params = {
-        "objective": "binary:logistic", "tree_method": "hist", "device": "cuda" if use_gpu else "cpu",
-        "enable_categorical": True, "eval_metric": ["logloss", "error"], "early_stopping_rounds": 100,
-        **best_params
-    }
-
-    stage_model = xgb.XGBClassifier(**final_stage_params)
-    stage_model.fit(X_tr_sel, y_tr, eval_set=[(X_tr_sel, y_tr), (X_va_sel, y_va)], verbose=False)
-    ev = stage_model.evals_result()
-
-    best_idx, va_ll, tr_ll, _ = _choose_best_index(ev)
-    best_n, loss_gap = best_idx + 1, abs(tr_ll - va_ll)
-
-    final_png = cfg.trial_plots_dir / f"{run_tag}_FINAL_stage.png" if cfg.save_plots_as_png else None
-    annotated_trial_plot(ev, title=f"Final Stage (best@{best_n}, gap={loss_gap:.3f})",
-                        best_idx=best_idx, gap=loss_gap, save_path_png=final_png,
-                        show_plots=cfg.show_plots, save_plots_as_png=cfg.save_plots_as_png)
-
-    fixed_params = {**final_stage_params, "n_estimators": int(best_n), "early_stopping_rounds": None}
-    X_refit, y_refit = (pd.concat([X_tr_sel, X_va_sel], axis=0), pd.concat([y_tr, y_va], axis=0)) if cfg.refit_on_train_plus_val else (X_tr_sel, y_tr)
-
-    refit_model = xgb.XGBClassifier(**fixed_params)
-    refit_model.fit(X_refit, y_refit, verbose=False)
-
-    va_proba, va_pred = refit_model.predict_proba(X_va_sel)[:, 1], (refit_model.predict_proba(X_va_sel)[:, 1] >= 0.5).astype(int)
-    va_ll, va_acc = log_loss(y_va, va_proba), accuracy_score(y_va, va_pred)
-    te_proba, te_pred = refit_model.predict_proba(X_te_sel)[:, 1], (refit_model.predict_proba(X_te_sel)[:, 1] >= 0.5).astype(int)
-    te_ll, te_acc, te_auc = log_loss(y_te, te_proba), accuracy_score(y_te, te_pred), roc_auc_score(y_te, te_proba)
-
-    print(f"\nVAL  -> LL {va_ll:.4f} | Acc {va_acc:.3f} | Gap {loss_gap:.4f}")
-    print(f"TEST -> LL {te_ll:.4f} | Acc {te_acc:.3f} | AUC {te_auc:.4f}")
-
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    final_name = f"{run_tag}_FINAL_VALacc{va_acc:.3f}_GAP{loss_gap:.3f}_VALll{va_ll:.3f}_TESTacc{te_acc:.3f}_TESTll{te_ll:.3f}_{ts}.json"
-    final_path = cfg.save_dir / final_name
-    refit_model.save_model(str(final_path))
-    print(f"✓ Saved FINAL model: {final_path.name}")
+    print(f"✓ Optimization complete. Intermediate models autosaved to: {cfg.save_dir}")
 
     return {
-        "best_n_estimators": int(best_n), "val_logloss": float(va_ll), "val_accuracy": float(va_acc),
-        "loss_gap": float(loss_gap), "test_logloss": float(te_ll), "test_accuracy": float(te_acc),
-        "test_auc": float(te_auc), "selected_features": sel_cols,
-        "refit_on_train_plus_val": cfg.refit_on_train_plus_val, "optuna_objective": cfg.optuna_objective,
+        "best_params": best_params,
+        "best_value": float(study.best_value),
+        "n_trials": optuna_trials,
+        "selected_features": sel_cols,
+        "optuna_objective": cfg.optuna_objective,
     }
 
 
@@ -370,7 +334,7 @@ CONFIG = Config(
     autosave_include_test=False,
     optuna_objective="logloss",
     val_logloss_save_max=1.0,
-    gap_max=1.0,
+    gap_max=0.5,
 )
 
 training_controller = TrainingController()
@@ -382,7 +346,7 @@ set_matplotlib_backend(CONFIG.show_plots)
 if __name__ == "__main__":
     try:
         res = train_single_split(
-            optuna_trials=1000,
+            optuna_trials=10000,
             include_odds=CONFIG.include_odds_columns,
             run_tag="ufc_xgb_single",
             use_gpu=True,

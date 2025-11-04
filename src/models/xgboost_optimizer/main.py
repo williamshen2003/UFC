@@ -111,10 +111,26 @@ def select_top_features_by_xgb(X_tr: pd.DataFrame, y_tr: pd.Series, k: int, enab
         return cols
 
     print(f"[FS] ENABLED → selecting top {k} features on TRAIN only...")
+    try:
+        xgb.set_config(verbosity=0)
+        # This will fail if no CUDA device / GPU support
+        test = xgb.XGBClassifier(device="cuda")
+        device = "cuda"
+    except Exception:
+        device = "cpu"
+
     fs_model = xgb.XGBClassifier(
-        objective="binary:logistic", tree_method="hist", device="cuda", enable_categorical=True,
-        n_estimators=200, max_depth=6, learning_rate=0.1, subsample=0.9, colsample_bytree=0.9,
-        eval_metric="logloss", verbosity=0
+        objective="binary:logistic",
+        tree_method="hist",  # keep hist for both CPU & GPU
+        device=device,  # <-- CPU/GPU auto selection
+        enable_categorical=True,
+        n_estimators=200,
+        max_depth=6,
+        learning_rate=0.1,
+        subsample=0.9,
+        colsample_bytree=0.9,
+        eval_metric="logloss",
+        verbosity=0
     )
     fs_model.fit(X_tr, y_tr, verbose=False)
 

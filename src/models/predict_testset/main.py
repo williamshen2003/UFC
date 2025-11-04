@@ -11,6 +11,12 @@ import numpy as np
 import pandas as pd
 import xgboost as xgb
 from sklearn.calibration import CalibratedClassifierCV
+from sklearn.base import _fit_context
+try:
+    from sklearn.utils.estimator_checks import FrozenEstimator
+except ImportError:
+    # For scikit-learn < 1.6
+    FrozenEstimator = None
 from sklearn.isotonic import IsotonicRegression
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
@@ -148,7 +154,11 @@ class ModelManager:
         typ = (self.config.calibration_type or 'isotonic').lower()
         for model in self.models:
             Xv, Xt = self._align_features(model, X_val), self._align_features(model, X_test)
-            cal = CalibratedClassifierCV(model, cv='prefit', method=typ)
+            # Use FrozenEstimator for scikit-learn 1.6+ compatibility
+            if FrozenEstimator is not None:
+                cal = CalibratedClassifierCV(FrozenEstimator(model), method=typ)
+            else:
+                cal = CalibratedClassifierCV(model, cv='prefit', method=typ)
             cal.fit(Xv, y_val)
             preds.append(cal.predict_proba(Xt))
         return preds

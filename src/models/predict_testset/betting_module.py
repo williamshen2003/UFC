@@ -37,6 +37,22 @@ class BettingEvaluator:
         avg_decimal = (american_to_decimal(open_odds) + american_to_decimal(close_odds)) / 2
         return round((avg_decimal - 1) * 100) if avg_decimal > 2 else round(-100 / (avg_decimal - 1))
 
+    def calculate_expected_value(self, probability: float, odds: float) -> float:
+        """Calculate expected value given win probability and American odds.
+
+        EV = (probability × decimal_odds) - 1
+
+        Args:
+            probability: Win probability (0 to 1)
+            odds: American odds (e.g., -150, +200)
+
+        Returns:
+            Expected value as a decimal (e.g., 0.05 = 5% edge)
+        """
+        # Convert American odds to decimal
+        decimal_odds = (odds / 100) + 1 if odds > 0 else (100 / abs(odds)) + 1
+        return (probability * decimal_odds) - 1
+
     def evaluate_bets(self, y_test: pd.Series, y_pred_proba_list: List[np.ndarray],
                       test_data: pd.DataFrame) -> Tuple:
         """
@@ -113,45 +129,79 @@ class BettingEvaluator:
                 models_agreeing = fight_info['models_agreeing']
                 num_models = fight_info['num_models']
 
-                # Determine winners
+                # Determine true winner
                 true_winner = row['fighter_a'] if true_outcome == 1 else row['fighter_b']
 
-                if y_pred_proba_avg[0] > y_pred_proba_avg[1]:
-                    predicted_winner = row['fighter_b']
-                    winning_probability = y_pred_proba_avg[0]
-                else:
+                # Get probabilities for both fighters
+                prob_fighter_a = y_pred_proba_avg[1]  # probability fighter A wins
+                prob_fighter_b = y_pred_proba_avg[0]  # probability fighter B wins
+
+                # Determine predicted winner for tracking purposes
+                if prob_fighter_a > prob_fighter_b:
                     predicted_winner = row['fighter_a']
-                    winning_probability = y_pred_proba_avg[1]
+                else:
+                    predicted_winner = row['fighter_b']
 
                 # Track confident predictions
                 confident_predictions += 1
                 if predicted_winner == true_winner:
                     correct_confident_predictions += 1
 
-                # Place bets if confidence meets threshold
+                # Get odds for both fighters
+                open_odds_a = row['current_fight_open_odds']
+                close_odds_a = row['current_fight_closing_odds']
+                open_odds_b = row['current_fight_open_odds_b']
+                close_odds_b = row['current_fight_closing_odds_b']
+
+                # Determine which odds to use
+                if self.config.odds_type == 'open':
+                    odds_a, odds_b = open_odds_a, open_odds_b
+                elif self.config.odds_type == 'close':
+                    odds_a, odds_b = close_odds_a, close_odds_b
+                else:  # 'average'
+                    odds_a = self.calculate_average_odds(open_odds_a, close_odds_a)
+                    odds_b = self.calculate_average_odds(open_odds_b, close_odds_b)
+
+                # Calculate expected value for both fighters
+                ev_fighter_a = self.calculate_expected_value(prob_fighter_a, odds_a)
+                ev_fighter_b = self.calculate_expected_value(prob_fighter_b, odds_b)
+
+                # Determine which fighter (if any) to bet on based on EV
                 # min_models: requires this many models to agree on prediction direction
                 # Uses 60% agreement threshold scaled to actual number of models available
                 min_models = max(1, int(np.ceil(num_models * 0.6))) if self.config.use_ensemble else 1
-                if winning_probability >= self.config.manual_threshold and models_agreeing >= min_models:
-                    # Get odds
-                    if predicted_winner == row['fighter_a']:
-                        open_odds = row['current_fight_open_odds']
-                        close_odds = row['current_fight_closing_odds']
-                    else:
-                        open_odds = row['current_fight_open_odds_b']
-                        close_odds = row['current_fight_closing_odds_b']
 
-                    # Determine which odds to use
-                    if self.config.odds_type == 'open':
-                        odds = open_odds
-                    elif self.config.odds_type == 'close':
-                        odds = close_odds
-                    else:  # 'average'
-                        odds = self.calculate_average_odds(open_odds, close_odds)
+                bet_fighter = None
+                winning_probability = 0
+                odds = 0
+                ev = 0
 
-                    # Skip if odds outside range
-                    if odds < self.config.min_odds or odds > self.config.max_underdog_odds:
-                        continue
+                # Use min_probability if available, otherwise fall back to manual_threshold
+                min_prob = getattr(self.config, 'min_probability', self.config.manual_threshold)
+
+                # Check if either fighter has positive EV above threshold
+                if ev_fighter_a > self.config.min_ev_threshold and models_agreeing >= min_models:
+                    if prob_fighter_a >= min_prob:
+                        # Skip if odds outside range
+                        if not (odds_a < self.config.min_odds or odds_a > self.config.max_underdog_odds):
+                            if bet_fighter is None or ev_fighter_a > ev:
+                                bet_fighter = row['fighter_a']
+                                winning_probability = prob_fighter_a
+                                odds = odds_a
+                                ev = ev_fighter_a
+
+                if ev_fighter_b > self.config.min_ev_threshold and models_agreeing >= min_models:
+                    if prob_fighter_b >= min_prob:
+                        # Skip if odds outside range
+                        if not (odds_b < self.config.min_odds or odds_b > self.config.max_underdog_odds):
+                            if bet_fighter is None or ev_fighter_b > ev:
+                                bet_fighter = row['fighter_b']
+                                winning_probability = prob_fighter_b
+                                odds = odds_b
+                                ev = ev_fighter_b
+
+                # Place bet if we found a valid bet
+                if bet_fighter is not None:
 
                     # Calculate stakes
                     fixed_available_before = available_fixed_bankroll
@@ -178,7 +228,9 @@ class BettingEvaluator:
                         'Date': current_date,
                         'True Winner': true_winner,
                         'Predicted Winner': predicted_winner,
+                        'Bet On': bet_fighter,
                         'Confidence': f"{winning_probability:.2%}",
+                        'Expected Value': f"{ev:.2%}",
                         'Odds': odds,
                         'Models Agreeing': models_agreeing,
                         'Num Models': num_models
@@ -198,7 +250,7 @@ class BettingEvaluator:
                             'Fixed Fraction Potential Profit': f"${fixed_profit:.2f}",
                         })
 
-                        if predicted_winner == true_winner:
+                        if bet_fighter == true_winner:
                             daily_fixed_profits[current_date] += fixed_profit
                             fixed_correct_bets += 1
                             bet_result['Fixed Fraction Profit'] = fixed_profit
@@ -225,7 +277,7 @@ class BettingEvaluator:
                             'Kelly Potential Profit': f"${kelly_profit:.2f}",
                         })
 
-                        if predicted_winner == true_winner:
+                        if bet_fighter == true_winner:
                             daily_kelly_profits[current_date] += kelly_profit
                             kelly_correct_bets += 1
                             bet_result['Kelly Profit'] = kelly_profit
@@ -297,8 +349,10 @@ class BettingEvaluator:
             fight_info = Group(
                 Text(f"True: {bet['True Winner'].title()}", style="green"),
                 Text(f"Predicted: {bet['Predicted Winner'].title()}", style="blue"),
+                Text(f"Bet On: {bet['Bet On'].title()}", style="magenta"),
                 Text(f"Confidence: {bet['Confidence']}", style="yellow"),
-                Text(f"Models: {bet['Models Agreeing']}/{bet['Num Models']}", style="cyan")
+                Text(f"Expected Value: {bet['Expected Value']}", style="cyan"),
+                Text(f"Models: {bet['Models Agreeing']}/{bet['Num Models']}", style="white")
             )
 
             main_panel = Panel(

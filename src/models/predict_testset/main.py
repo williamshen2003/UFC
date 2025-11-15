@@ -285,7 +285,9 @@ class Config:
     require_trained_encoder: bool = True
 
     # === BETTING ===
-    manual_threshold: float = 0.5
+    manual_threshold: float = 0.5          # Deprecated - kept for compatibility, use min_probability instead
+    min_probability: float = 0.20          # Minimum win probability to consider betting (floor to avoid long shots)
+    min_ev_threshold: float = 0.02         # Minimum expected value (e.g., 0.02 = 2% edge)
     initial_bankroll: float = 10000
     kelly_fraction: float = 0.5
     fixed_bet_fraction: float = 0.1
